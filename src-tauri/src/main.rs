@@ -17,8 +17,10 @@ use chrono::Local;
 use email::{EmailRequest, SmtpConfig};
 use llm::LlmProvider;
 use report::{ReportRecord, Template};
+use scheduler::{Schedule, SchedulerState};
 use serde::{Deserialize, Serialize};
 use state::Settings;
+use tauri::Manager;
 use workspace::Workspace;
 
 /// 应用入口。
@@ -42,6 +44,22 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_clipboard_manager::init())
+        .setup(|app| {
+            // 初始化 scheduler 并加载所有 enabled 任务。
+            // 用 block_on 确保后续 command 能立刻 state::<SchedulerState>。
+            let scheduler = tauri::async_runtime::block_on(async {
+                let s = SchedulerState::new().await?;
+                if let Err(e) = s.reload_all().await {
+                    tracing::warn!("reload_all 失败（继续启动）: {:#}", e);
+                }
+                anyhow::Ok(s)
+            })
+            .map_err(|e| {
+                Box::<dyn std::error::Error>::from(format!("初始化 scheduler 失败: {e:#}"))
+            })?;
+            app.manage(scheduler);
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             ping,
             // Workspaces
@@ -72,6 +90,11 @@ fn main() {
             save_smtp_config,
             test_smtp_config,
             send_test_email,
+            // Schedules
+            list_schedules,
+            save_schedule,
+            delete_schedule,
+            run_schedule_now,
             // Misc
             data_dir_path,
         ])
@@ -218,126 +241,16 @@ struct GenerateRequest {
     provider_id: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
-struct GenerateResponse {
-    record: ReportRecord,
-    content: String,
-    duration_ms: u64,
-}
-
 #[tauri::command]
-async fn generate_report(req: GenerateRequest) -> Result<GenerateResponse, String> {
-    generate_impl(req).await.map_err(err_to_string)
-}
-
-async fn generate_impl(req: GenerateRequest) -> anyhow::Result<GenerateResponse> {
-    use anyhow::{anyhow, bail};
-
-    // 1. 模板
-    let template = state::list_templates()?
-        .into_iter()
-        .find(|t| t.id == req.template_id)
-        .ok_or_else(|| anyhow!("模板不存在: {}", req.template_id))?;
-
-    // 2. 解析 provider（按 LLM.md §6 优先级）
-    let provider = resolve_provider(req.provider_id.as_deref(), template.provider_id.as_deref())?;
-
-    // 3. 工作区
-    let all_ws = state::list_workspaces()?;
-    let workspaces: Vec<Workspace> = all_ws
-        .into_iter()
-        .filter(|w| req.workspace_ids.iter().any(|id| id == &w.id))
-        .collect();
-    if workspaces.is_empty() {
-        bail!("未选中任何工作区");
-    }
-
-    // 4. 设置
-    let settings = state::get_settings()?;
-    let clip = settings.prompt_clip_chars as usize;
-
-    // 5. 收集 messages（多 workspace 串行，错误不阻塞）
-    let mut messages = Vec::new();
-    for ws in &workspaces {
-        match logs::collect_messages(ws, req.days, clip).await {
-            Ok(part) => messages.extend(part),
-            Err(e) => tracing::warn!("workspace {} 收集日志失败: {:#}", ws.name, e),
-        }
-    }
-
-    // 6. 聚合
-    let summary = logs::aggregate(messages);
-
-    // 7. 历史报告作为风格参考
-    let past = load_past_reports(settings.past_reports_context as usize)?;
-
-    // 8. 生成
-    let (markdown, tokens, duration_ms) =
-        report::generate(&summary, &template, &past, &provider).await?;
-
-    // 9. 存档
-    let record = ReportRecord {
-        id: String::new(),
-        week: format!("最近 {} 天", req.days),
-        template_id: template.id.clone(),
-        template_name: template.name.clone(),
-        provider_id: Some(provider.id.clone()),
-        provider_name: Some(provider.name.clone()),
-        tokens_used: tokens,
-        project_count: summary.stats.project_count,
-        generated_at: Local::now().to_rfc3339(),
-    };
-    let saved = state::save_report(record, &markdown)?;
-
-    Ok(GenerateResponse {
-        record: saved,
-        content: markdown,
-        duration_ms,
-    })
-}
-
-/// 按 docs/LLM.md §6 的优先级解析 provider：
-/// 显式 > 模板 > 默认 > 第一个 > 报错。
-fn resolve_provider(
-    explicit: Option<&str>,
-    template_pid: Option<&str>,
-) -> anyhow::Result<LlmProvider> {
-    let providers = state::list_providers()?;
-
-    if let Some(id) = explicit {
-        if !id.is_empty() {
-            if let Some(p) = providers.iter().find(|p| p.id == id) {
-                return Ok(p.clone());
-            }
-            return Err(anyhow::anyhow!("指定的 LLM 源不存在: {id}"));
-        }
-    }
-    if let Some(id) = template_pid {
-        if !id.is_empty() {
-            if let Some(p) = providers.iter().find(|p| p.id == id) {
-                return Ok(p.clone());
-            }
-            // 模板指定的 provider 已被删除 → 回退到默认（不报错）
-        }
-    }
-    state::get_default_provider()
-}
-
-/// 取最近 `n` 份历史报告的 Markdown 正文。失败的单条 warn! 后跳过。
-fn load_past_reports(n: usize) -> anyhow::Result<Vec<String>> {
-    if n == 0 {
-        return Ok(Vec::new());
-    }
-    let mut records = state::list_reports()?;
-    records.sort_by(|a, b| b.generated_at.cmp(&a.generated_at));
-    let mut out = Vec::new();
-    for r in records.into_iter().take(n) {
-        match store::load_report_file(&r.id) {
-            Ok(s) => out.push(s),
-            Err(e) => tracing::warn!("加载历史报告 {} 失败: {:#}", r.id, e),
-        }
-    }
-    Ok(out)
+async fn generate_report(req: GenerateRequest) -> Result<report::GenerationOutput, String> {
+    report::run_generation(
+        &req.workspace_ids,
+        &req.template_id,
+        req.days,
+        req.provider_id.as_deref(),
+    )
+    .await
+    .map_err(err_to_string)
 }
 
 // ============================================================
@@ -400,4 +313,71 @@ async fn send_test_email(req: TestEmailRequest) -> Result<String, String> {
         .await
         .map_err(err_to_string)?;
     Ok(format!("✓ 测试邮件已发送到 {recipient}"))
+}
+
+// ============================================================
+// Schedules
+// ============================================================
+
+#[derive(Debug, Serialize)]
+struct ScheduleView {
+    #[serde(flatten)]
+    schedule: Schedule,
+    /// 运行时计算的下次触发时间（仅展示用，不持久化）
+    next_run_computed: Option<String>,
+}
+
+fn enrich_schedules(list: Vec<Schedule>) -> Vec<ScheduleView> {
+    list.into_iter()
+        .map(|s| {
+            let next = if s.enabled {
+                scheduler::next_run_time(&s.cron)
+            } else {
+                None
+            };
+            ScheduleView {
+                schedule: s,
+                next_run_computed: next,
+            }
+        })
+        .collect()
+}
+
+#[tauri::command]
+async fn list_schedules() -> Result<Vec<ScheduleView>, String> {
+    let list = state::list_schedules().map_err(err_to_string)?;
+    Ok(enrich_schedules(list))
+}
+
+#[tauri::command]
+async fn save_schedule(
+    scheduler: tauri::State<'_, SchedulerState>,
+    schedule: Schedule,
+) -> Result<Schedule, String> {
+    let saved = state::save_schedule(schedule).map_err(err_to_string)?;
+    scheduler.refresh_job(&saved).await.map_err(err_to_string)?;
+    Ok(saved)
+}
+
+#[tauri::command]
+async fn delete_schedule(
+    scheduler: tauri::State<'_, SchedulerState>,
+    id: String,
+) -> Result<(), String> {
+    scheduler.remove_job(&id).await.map_err(err_to_string)?;
+    state::delete_schedule(&id).map_err(err_to_string)?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn run_schedule_now(id: String) -> Result<String, String> {
+    let sch = state::list_schedules()
+        .map_err(err_to_string)?
+        .into_iter()
+        .find(|s| s.id == id)
+        .ok_or_else(|| format!("任务不存在: {id}"))?;
+    scheduler::execute_schedule(&sch)
+        .await
+        .map_err(err_to_string)?;
+    Ok(format!("✓ 任务「{}」立即执行完成", sch.name))
 }

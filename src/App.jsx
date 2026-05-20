@@ -6,6 +6,7 @@ import { useState } from 'react';
 import GenerateDialog from './components/GenerateDialog.jsx';
 import Providers from './components/Providers.jsx';
 import Reports from './components/Reports.jsx';
+import Schedules from './components/Schedules.jsx';
 import Settings from './components/Settings.jsx';
 import Templates from './components/Templates.jsx';
 import { Icon } from './components/ui.jsx';
@@ -86,6 +87,7 @@ function Page({ page, reportsNonce }) {
   if (page === 'providers') return <Providers />;
   if (page === 'templates') return <Templates />;
   if (page === 'reports') return <Reports key={reportsNonce} />;
+  if (page === 'schedules') return <Schedules />;
   if (page === 'settings') return <Settings />;
   return (
     <Placeholder

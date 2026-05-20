@@ -101,6 +101,27 @@ export function saveSettings(settings) {
 }
 
 // ============================================================
+// Schedules
+// ============================================================
+
+/// 返回 ScheduleView 数组（每条 schedule + next_run_computed）。
+export function listSchedules() {
+  return invoke('list_schedules');
+}
+
+export function saveSchedule(schedule) {
+  return invoke('save_schedule', { schedule });
+}
+
+export function deleteSchedule(id) {
+  return invoke('delete_schedule', { id });
+}
+
+export function runScheduleNow(id) {
+  return invoke('run_schedule_now', { id });
+}
+
+// ============================================================
 // SMTP
 // ============================================================
 

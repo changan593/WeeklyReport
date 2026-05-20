@@ -352,6 +352,23 @@ pub fn delete_schedule(id: &str) -> Result<()> {
     store::write_json(F_SCHEDULES, &list)
 }
 
+/// 只更新 schedule 的 `last_run` / `last_status` 字段；其他字段原样保留。
+///
+/// 给 scheduler 在任务完成（成功或失败）后调用。
+pub fn update_schedule_run_status(
+    id: &str,
+    last_run: Option<String>,
+    last_status: Option<String>,
+) -> Result<()> {
+    let mut list = list_schedules()?;
+    if let Some(s) = list.iter_mut().find(|s| s.id == id) {
+        s.last_run = last_run;
+        s.last_status = last_status;
+        store::write_json(F_SCHEDULES, &list)?;
+    }
+    Ok(())
+}
+
 // ============================================================
 // SMTP（单例）
 // ============================================================
