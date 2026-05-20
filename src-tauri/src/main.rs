@@ -5,6 +5,7 @@ use tracing_subscriber::EnvFilter;
 
 mod email;
 mod llm;
+mod logs;
 mod report;
 mod scheduler;
 mod state;
