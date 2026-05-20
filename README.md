@@ -70,6 +70,53 @@ npm run tauri:build        # 打包发布版
 
 详细数据模型见 [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md#数据存储)。
 
+## 安全与隐私 ⚠
+
+应用会接入工作服务器 SSH、发送邮件、调用 LLM API，请在使用前确认你接受以下边界：
+
+### 数据流向
+
+| 目的地                        | 包含什么                                            | 触发时机                  |
+| ----------------------------- | --------------------------------------------------- | ------------------------- |
+| 配置好的 **LLM endpoint**     | 全部用户 prompt（截断到 2000 字/条）、项目名、服务器名 | 每次"生成周报"           |
+| 配置好的 **SMTP 服务器**      | 周报 Markdown 全文                                   | 定时任务 / "发测试邮件" |
+| 远端 **SSH 服务器**           | rsync `.claude/`、`.codex/` 子树到本地 cache         | 每次抓取远程工作区日志    |
+| 本地 cache 目录               | 拉回的 jsonl 全文                                    | 同上，0700 权限           |
+
+**敏感信息防护：** 应用不做内容脱敏。如果你在 Claude Code / Codex 里粘贴过 API key、内部
+URL、客户名字等，它们会**原样**进入周报 prompt。建议：
+
+- 工作内容机密时，使用预设里的 **本地 Ollama / vLLM / LM Studio**，数据不离开本机。
+- 上线生产前在 Settings 里只填**测试**邮箱与 LLM key，验证后再换。
+
+### 凭据存储（v0.1.0 临时方案）
+
+- LLM API key、SMTP 密码当前**明文**保存在 `llm_providers.json` / `smtp.json`，权限 `0600`。
+- 这能挡同主机其他用户的旁路读取，但**挡不住以同一用户运行的恶意进程**（流氓 npm 包、
+  浏览器扩展、备份服务）。
+- v0.2.0 路线图：用 `keyring` crate 接入 macOS Keychain / Windows Credential Manager /
+  Linux Secret Service（见 [ADR-008](./docs/DECISIONS.md#adr-008api-key-明文存储v010)）。
+
+### SSH 主机密钥（TOFU）
+
+应用使用 `StrictHostKeyChecking=accept-new`：首次连接自动收录服务端公钥，之后**任何变化**
+立即报错。这意味着：
+
+- 服务器重装系统 / IP 复用 / 中间人攻击都会触发同一类错误：`REMOTE HOST IDENTIFICATION HAS CHANGED`。
+- **不要盲目** `ssh-keygen -R <host>` 清除记录后重连——先与服务器管理员核对当前公钥指纹。
+- 第一次连接时如果路径上已经有中间人，你仍会收录到伪造的公钥（TOFU 的固有限制）。
+  务必在受信网络环境下完成首次配置。
+
+### 网络
+
+- 应用**不上报任何用户数据**（无 telemetry、无崩溃汇报）。
+- 所有出站请求只发往：你配置的 LLM endpoint、SMTP 服务器、SSH 服务器。
+- HTTPS 走 rustls + 系统 CA。无证书 pinning（企业 mitmproxy 可解开流量）。
+
+### 报告其它安全问题
+
+请通过 GitHub Issue 私信维护者，或邮件到仓库主页公开的邮箱。
+
 ## 文档
 
 | 文档                                              | 内容                                |

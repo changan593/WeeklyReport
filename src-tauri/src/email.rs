@@ -74,6 +74,12 @@ pub async fn send(cfg: &SmtpConfig, req: &EmailRequest) -> Result<()> {
     if req.to.is_empty() {
         return Err(anyhow!("收件人列表为空"));
     }
+    // 校验主题不含 CRLF（兜底；lettre 也会拒绝，但我们提供更友好的错误）
+    crate::validate::mail_header_text(&req.subject)?;
+    // 校验所有收件人/抄送地址格式
+    for addr in req.to.iter().chain(req.cc.iter()) {
+        crate::validate::email(addr)?;
+    }
 
     let transport = build_transport(cfg)?;
     let from = parse_from(cfg)?;
@@ -141,10 +147,16 @@ fn build_transport(cfg: &SmtpConfig) -> Result<AsyncSmtpTransport<Tokio1Executor
 }
 
 fn parse_from(cfg: &SmtpConfig) -> Result<Mailbox> {
-    let s = if cfg.from_name.trim().is_empty() {
+    // from_name 走 mail_header 校验；防止 CRLF 注入到 From: 头
+    let trimmed = cfg.from_name.trim();
+    if !trimmed.is_empty() {
+        crate::validate::mail_header_text(trimmed)?;
+    }
+    crate::validate::email(&cfg.username)?;
+    let s = if trimmed.is_empty() {
         cfg.username.clone()
     } else {
-        format!("{} <{}>", cfg.from_name.trim(), cfg.username)
+        format!("{} <{}>", trimmed, cfg.username)
     };
     parse_mailbox(&s)
 }

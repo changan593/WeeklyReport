@@ -5,8 +5,13 @@
 //!
 //! 所有 SSH 调用都加：
 //! - `BatchMode=yes`（禁止任何交互式密码输入）
-//! - `StrictHostKeyChecking=no`（不卡 known_hosts，初次连接也能跑）
+//! - `StrictHostKeyChecking=accept-new`（首次连接 TOFU 收录公钥，
+//!   之后任何 host key 变更立刻报错——抵御中间人）
 //! - `ConnectTimeout=8`（连接 8 秒超时）
+//!
+//! `host` / `user` 字段在 [`workspace::validate`] 已经过白名单校验，
+//! 此处再做一次防御（depth-in-depth）。`claude_path` / `codex_path`
+//! 由用户填，可能含空格或特殊字符 → 远端 shell 用 [`sh_quote`] 严格转义。
 #![allow(dead_code)]
 
 use anyhow::{anyhow, Result};
@@ -14,6 +19,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
 
+use crate::validate;
 use crate::workspace::{expand_tilde, Workspace, WorkspaceKind};
 
 const CONNECT_TIMEOUT_SECS: u32 = 8;
@@ -30,6 +36,9 @@ pub async fn test(ws: &Workspace) -> Result<String> {
     let user = ws.user.as_deref().unwrap_or("root");
     let host = ws.host.as_deref().unwrap_or_default();
     let port = ws.port.unwrap_or(22);
+    // 即便上层已校验，此处仍做一次防御（深度防御 / depth-in-depth）。
+    validate::ssh_host(host)?;
+    validate::ssh_user(user)?;
 
     let want_claude = ws.tools.iter().any(|t| t == "claude-code");
     let want_codex = ws.tools.iter().any(|t| t == "codex");
@@ -98,8 +107,17 @@ fn format_ssh_error(stderr: &str, exit_code: Option<i32>) -> anyhow::Error {
         "无法解析主机名：检查 host 拼写".into()
     } else if lower.contains("no route to host") || lower.contains("network is unreachable") {
         "无法连接到 host：检查网络与防火墙".into()
-    } else if lower.contains("host key verification failed") {
-        "Host key 校验失败（罕见，因为我们已设 StrictHostKeyChecking=no）".into()
+    } else if lower.contains("host key verification failed")
+        || lower.contains("remote host identification has changed")
+        || lower.contains("possible man-in-the-middle attack")
+    {
+        // 关键安全提示：host key 与本地 known_hosts 不一致
+        // 用户必须人工核对（联系服务器管理员确认变更原因）后再修复
+        "⚠ 服务端 SSH 公钥与本地记录不一致！\n\
+         可能原因（按概率）：服务器重装系统 / IP 被复用 / 中间人攻击。\n\
+         **不要盲目删 known_hosts**。先与服务器管理员核对当前公钥指纹，\n\
+         确认无误后执行：ssh-keygen -R <host>，再重新连接。"
+            .into()
     } else {
         "SSH 命令失败".into()
     };
@@ -129,10 +147,13 @@ pub async fn sync_to_cache(ws: &Workspace) -> Result<HashMap<String, PathBuf>> {
     require_ssh(ws)?;
     let user = ws.user.as_deref().unwrap_or("root");
     let host = ws.host.as_deref().unwrap_or_default();
+    validate::ssh_host(host)?;
+    validate::ssh_user(user)?;
     let ssh_e_arg = build_rsync_ssh_arg(ws);
 
     let root = cache_root(&ws.id)?;
     std::fs::create_dir_all(&root)?;
+    restrict_dir_to_user(&root);
 
     let mut out = HashMap::new();
     if ws.tools.iter().any(|t| t == "claude-code") {
@@ -221,8 +242,10 @@ fn base_ssh_args(ws: &Workspace) -> Vec<String> {
     let mut args = vec![
         "-o".into(),
         "BatchMode=yes".into(),
+        // accept-new：首次连接 TOFU 记录公钥；之后变更立即报错。
+        // 比 `no` 安全得多（`no` 完全不校验，等同于裸奔）。
         "-o".into(),
-        "StrictHostKeyChecking=no".into(),
+        "StrictHostKeyChecking=accept-new".into(),
         "-o".into(),
         format!("ConnectTimeout={CONNECT_TIMEOUT_SECS}"),
     ];
@@ -244,7 +267,8 @@ fn base_ssh_args(ws: &Workspace) -> Vec<String> {
 /// 拼成 `rsync -e "ssh -o ... -p ... -i ..."` 所需的单参数字符串。
 fn build_rsync_ssh_arg(ws: &Workspace) -> String {
     let mut s = format!(
-        "ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout={CONNECT_TIMEOUT_SECS}"
+        "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
+         -o ConnectTimeout={CONNECT_TIMEOUT_SECS}"
     );
     if let Some(p) = ws.port {
         if p != 22 {
@@ -259,6 +283,41 @@ fn build_rsync_ssh_arg(ws: &Workspace) -> String {
     }
     s
 }
+
+/// 清理 SSH 工作区的本地缓存目录（用户删除 workspace 时调用）。
+///
+/// 缓存里是远端 rsync 拉回的全部 jsonl，含 prompt 历史、cwd 路径等敏感数据。
+/// 不清理 → 工作区被"删除"后数据仍留在硬盘上。
+///
+/// best-effort：失败仅 warn，不阻断 workspace 删除流程。
+pub fn cleanup_cache(ws_id: &str) {
+    let root = match cache_root(ws_id) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!("无法定位 cache 目录: {e}");
+            return;
+        }
+    };
+    if !root.exists() {
+        return;
+    }
+    if let Err(e) = std::fs::remove_dir_all(&root) {
+        tracing::warn!("清理缓存 {} 失败: {e}", root.display());
+    }
+}
+
+/// 把目录权限设为 0o700。仅 Unix 生效。
+#[cfg(unix)]
+fn restrict_dir_to_user(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let perms = std::fs::Permissions::from_mode(0o700);
+    if let Err(e) = std::fs::set_permissions(path, perms) {
+        tracing::warn!("无法设置缓存 {} 为 0700: {e}", path.display());
+    }
+}
+
+#[cfg(not(unix))]
+fn restrict_dir_to_user(_path: &Path) {}
 
 /// 跨平台缓存根目录：
 /// - macOS:   `~/Library/Caches/WeeklyReport/<ws_id>/`
@@ -317,7 +376,9 @@ mod tests {
         let args = base_ssh_args(&ssh_ws());
         let joined = args.join(" ");
         assert!(joined.contains("BatchMode=yes"));
-        assert!(joined.contains("StrictHostKeyChecking=no"));
+        // accept-new：TOFU，有 host key 变更检测，而不是裸奔 `no`
+        assert!(joined.contains("StrictHostKeyChecking=accept-new"));
+        assert!(!joined.contains("StrictHostKeyChecking=no"));
         assert!(joined.contains("ConnectTimeout=8"));
         assert!(joined.contains("-p 2200"));
         assert!(joined.contains("-i "));
@@ -338,8 +399,24 @@ mod tests {
         let s = build_rsync_ssh_arg(&ssh_ws());
         assert!(s.starts_with("ssh "));
         assert!(s.contains("BatchMode=yes"));
+        assert!(s.contains("StrictHostKeyChecking=accept-new"));
+        assert!(!s.contains("StrictHostKeyChecking=no"));
         assert!(s.contains("-p 2200"));
         assert!(s.contains("-i "));
+    }
+
+    #[test]
+    fn format_ssh_error_warns_on_host_key_change() {
+        // 关键安全场景：MITM 或服务器重装时本地 known_hosts 不一致
+        let e = format_ssh_error(
+            "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\n\
+             @    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @\n\
+             ...possible man-in-the-middle attack...",
+            Some(255),
+        );
+        let s = e.to_string();
+        assert!(s.contains("不一致"), "应明确提示 host key 不一致");
+        assert!(s.contains("中间人") || s.contains("管理员"));
     }
 
     #[test]
@@ -429,6 +506,37 @@ mod tests {
         // $ 和 ` 在双引号内会被展开，但在单引号内是普通字符
         assert_eq!(sh_quote("$PATH"), "'$PATH'");
         assert_eq!(sh_quote("`whoami`"), "'`whoami`'");
+    }
+
+    #[test]
+    fn cleanup_cache_removes_existing_dir() {
+        // 用 uuid 生成的 ID（满足 validate::id 白名单）
+        let ws_id = uuid::Uuid::new_v4().to_string();
+        let root = cache_root(&ws_id).unwrap();
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("dummy.jsonl"), b"data").unwrap();
+        assert!(root.exists());
+
+        cleanup_cache(&ws_id);
+        assert!(!root.exists(), "cleanup_cache 应删除缓存目录");
+    }
+
+    #[test]
+    fn cleanup_cache_is_noop_when_missing() {
+        // 不存在的 ws_id 不应报错
+        let ws_id = uuid::Uuid::new_v4().to_string();
+        let root = cache_root(&ws_id).unwrap();
+        // 确保它不存在
+        let _ = std::fs::remove_dir_all(&root);
+        cleanup_cache(&ws_id); // best-effort，不 panic
+    }
+
+    #[tokio::test]
+    async fn sync_to_cache_rejects_malicious_host() {
+        // 即使绕过上层校验，sync_to_cache 内部还会再次校验 host
+        let mut ws = ssh_ws();
+        ws.host = Some("-oProxyCommand=evil".into());
+        assert!(sync_to_cache(&ws).await.is_err());
     }
 
     #[tokio::test]

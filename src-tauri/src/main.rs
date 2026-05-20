@@ -11,6 +11,7 @@ mod scheduler;
 mod ssh;
 mod state;
 mod store;
+mod validate;
 mod workspace;
 
 use chrono::Local;
@@ -40,6 +41,10 @@ fn main() {
     }
 
     tauri::Builder::default()
+        // 插件初始化保留以便将来扩展（如 SSH 私钥文件选择器），但前端目前未调用
+        // 任何插件 API；`capabilities/default.json` 中也未授予 shell:/dialog:/fs:/
+        // clipboard-manager: 权限，因此即便前端被 XSS 也无法触发这些能力。
+        // 复制 Markdown 到剪贴板用浏览器原生 `navigator.clipboard.writeText`。
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
@@ -148,6 +153,7 @@ async fn save_workspace(workspace: Workspace) -> Result<Workspace, String> {
 
 #[tauri::command]
 async fn delete_workspace(id: String) -> Result<(), String> {
+    validate::id(&id).map_err(err_to_string)?;
     state::delete_workspace(&id).map_err(err_to_string)
 }
 
@@ -174,6 +180,7 @@ async fn save_provider(provider: LlmProvider) -> Result<LlmProvider, String> {
 
 #[tauri::command]
 async fn delete_provider(id: String) -> Result<(), String> {
+    validate::id(&id).map_err(err_to_string)?;
     state::delete_provider(&id).map_err(err_to_string)
 }
 
@@ -203,6 +210,7 @@ async fn save_template(template: Template) -> Result<Template, String> {
 
 #[tauri::command]
 async fn delete_template(id: String) -> Result<(), String> {
+    validate::id(&id).map_err(err_to_string)?;
     state::delete_template(&id).map_err(err_to_string)
 }
 
@@ -223,12 +231,14 @@ async fn list_reports() -> Result<Vec<ReportRecord>, String> {
 
 #[tauri::command]
 async fn get_report(id: String) -> Result<ReportPayload, String> {
+    validate::id(&id).map_err(err_to_string)?;
     let (record, content) = state::get_report(&id).map_err(err_to_string)?;
     Ok(ReportPayload { record, content })
 }
 
 #[tauri::command]
 async fn delete_report(id: String) -> Result<(), String> {
+    validate::id(&id).map_err(err_to_string)?;
     state::delete_report(&id).map_err(err_to_string)
 }
 
@@ -298,6 +308,8 @@ async fn send_test_email(req: TestEmailRequest) -> Result<String, String> {
     if recipient.is_empty() {
         return Err("收件人为空".into());
     }
+    // 收件人在送 lettre 之前先做白名单校验
+    validate::email(&recipient).map_err(err_to_string)?;
     let body = EmailRequest {
         to: vec![recipient.clone()],
         cc: vec![],
@@ -364,6 +376,7 @@ async fn delete_schedule(
     scheduler: tauri::State<'_, SchedulerState>,
     id: String,
 ) -> Result<(), String> {
+    validate::id(&id).map_err(err_to_string)?;
     scheduler.remove_job(&id).await.map_err(err_to_string)?;
     state::delete_schedule(&id).map_err(err_to_string)?;
     Ok(())
@@ -371,6 +384,7 @@ async fn delete_schedule(
 
 #[tauri::command]
 async fn run_schedule_now(id: String) -> Result<String, String> {
+    validate::id(&id).map_err(err_to_string)?;
     let sch = state::list_schedules()
         .map_err(err_to_string)?
         .into_iter()

@@ -13,6 +13,28 @@
 - 真实图标资源（替换占位 PNG，使用 `cargo tauri icon` 生成）
 - GitHub Actions CI（三平台并行构建 + tag 触发发布）
 
+### Security（v0.1.0 安全审查整改）
+
+详见 [ADR-012](./DECISIONS.md#adr-012ssh-主机密钥校验用-accept-new-而非-no) /
+[ADR-013](./DECISIONS.md#adr-013输入校验集中在-validate-模块白名单) /
+[ADR-014](./DECISIONS.md#adr-014tauri-capabilities-收紧到-coredefault)。
+
+- **SSH**：`StrictHostKeyChecking` 从 `no` 升级到 `accept-new`，识别 MITM / host key 变更
+- **凭据**：敏感文件以 `OpenOptions.mode(0o600)` 创建临时文件，消除"先 644 再 chmod"的 TOCTOU 窗口
+- **目录权限**：数据目录与 SSH 缓存目录都 chmod `0o700`
+- **校验**：新建 `validate` 模块统一白名单校验（id / ssh_host / ssh_user / email / mail_header）
+- **路径穿越**：所有 IPC handler 与 `store::save_report_file` 等接受 `id` 的入口先过白名单
+- **CRLF 注入**：SMTP subject / from_name / 收件人都过 `mail_header_text` 校验
+- **Prompt 注入**：build_prompt 顶部增加 SYSTEM 块声明数据/指令边界，单条用户 prompt 截断到 2000 字，历史报告每份 4000 字，数据中 `< >` 替换为全角避免伪造闭合标签
+- **响应大小**：LLM HTTP 响应流式读取，超过 10 MB 立即中断（防恶意端点 OOM）
+- **级联清理**：删除 workspace 时清空对应 SSH 本地 cache；`.broken-*` 备份超过 30 天自动清理
+- **引用检查**：删除 provider 时拦截被 template / schedule 引用的情况
+- **Tauri 沙箱**：CSP 从 `null` 改为白名单（`default-src 'self'`、`script-src 'self'`、`connect-src` 仅 IPC），capabilities 缩减到 `core:default`
+- **报告文件**：报告 Markdown 也以 `0o600` 写入（可能含敏感工作信息）
+- **删除报告顺序修复**：先删 .md → 再删 index，避免 index 已删但 .md 仍在的 orphan 文件
+- **前端透明度**：Providers / Settings / Workspaces 页面加显眼的数据流向与凭据风险提示
+- **原子写防御**：拒绝在已存在的 `.tmp` symlink 上写入（防恶意进程预创建符号链接劫持写操作）
+
 ---
 
 ## [0.1.0] - 待发布

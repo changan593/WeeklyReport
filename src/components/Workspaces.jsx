@@ -237,28 +237,39 @@ function WorkspaceEditor({ initial, onClose, onSaved }) {
         </FormField>
 
         {ws.type === 'ssh' && (
-          <div className="grid grid-cols-2 gap-3">
-            <FormField label="Host" className="col-span-2">
-              <Input
-                value={ws.host}
-                onChange={(v) => set('host', v)}
-                placeholder="example.com"
-              />
-            </FormField>
-            <FormField label="User">
-              <Input value={ws.user} onChange={(v) => set('user', v)} placeholder="root" />
-            </FormField>
-            <FormField label="Port">
-              <Input
-                value={String(ws.port ?? 22)}
-                onChange={(v) => set('port', v)}
-                placeholder="22"
-              />
-            </FormField>
-            <FormField label="SSH 私钥路径（可选）" className="col-span-2" hint="留空使用系统默认 ~/.ssh/id_rsa">
-              <Mono value={ws.ssh_key} onChange={(v) => set('ssh_key', v)} placeholder="~/.ssh/id_ed25519" />
-            </FormField>
-          </div>
+          <>
+            <div className="rounded border border-sky-200 bg-sky-50 px-3 py-2 text-[12px] text-sky-800">
+              <div className="font-medium">SSH 主机密钥校验（TOFU）</div>
+              <div className="mt-0.5 text-sky-700">
+                首次连接会自动把服务端公钥写入 <code className="font-mono">~/.ssh/known_hosts</code>。
+                之后若服务端公钥变化（重装系统 / IP 复用 / 中间人攻击），rsync 会立即报错——
+                这是 <code className="font-mono">StrictHostKeyChecking=accept-new</code> 的设计。
+                出现该错误时请<strong>先与服务器管理员核对公钥指纹</strong>，再决定是否更新。
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <FormField label="Host" className="col-span-2" hint="仅字母数字、点、冒号；不能以 '-' 开头">
+                <Input
+                  value={ws.host}
+                  onChange={(v) => set('host', v)}
+                  placeholder="example.com"
+                />
+              </FormField>
+              <FormField label="User" hint="POSIX 用户名">
+                <Input value={ws.user} onChange={(v) => set('user', v)} placeholder="root" />
+              </FormField>
+              <FormField label="Port">
+                <Input
+                  value={String(ws.port ?? 22)}
+                  onChange={(v) => set('port', v)}
+                  placeholder="22"
+                />
+              </FormField>
+              <FormField label="SSH 私钥路径（可选）" className="col-span-2" hint="留空使用系统默认 ~/.ssh/id_rsa">
+                <Mono value={ws.ssh_key} onChange={(v) => set('ssh_key', v)} placeholder="~/.ssh/id_ed25519" />
+              </FormField>
+            </div>
+          </>
         )}
 
         {/* Tools */}

@@ -1,13 +1,16 @@
-//! Workspace 数据模型 + 路径工具。
+//! Workspace 数据模型 + 路径工具 + 输入校验。
 //!
-//! 连接测试逻辑（`test_connection`）由后续阶段实现：
+//! 连接测试逻辑（`test_connection`）：
 //! - 本机：检查 claude_path / codex_path 是否存在
-//! - SSH：调用 `crate::ssh::test`（阶段 6）
+//! - SSH：调用 `crate::ssh::test`
 //!
 //! 详见 `docs/ARCHITECTURE.md#33-workspacers`。
 #![allow(dead_code)]
 
+use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
+
+use crate::validate;
 
 /// Workspace 类型：本机或 SSH 远程。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -46,13 +49,50 @@ pub struct Workspace {
     pub tools: Vec<String>,
 }
 
+/// 校验 Workspace 字段。在 `save_workspace` 与 `test_connection` 前都应调用。
+///
+/// SSH 工作区强校验 `host` / `user`（防 OpenSSH 参数注入）；本机不需要。
+pub fn validate(ws: &Workspace) -> Result<()> {
+    if ws.name.trim().is_empty() {
+        bail!("工作区名称不能为空");
+    }
+    if ws.name.len() > 64 {
+        bail!("工作区名称过长（最多 64 字符）");
+    }
+    match ws.kind {
+        WorkspaceKind::Local => {}
+        WorkspaceKind::Ssh => {
+            let host = ws
+                .host
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| anyhow::anyhow!("SSH 工作区缺少 host"))?;
+            validate::ssh_host(host)?;
+            // user 缺省时 ssh 用客户端当前用户；填了就校验
+            if let Some(u) = ws.user.as_deref() {
+                if !u.is_empty() {
+                    validate::ssh_user(u)?;
+                }
+            }
+            // ssh_key 路径不在白名单内（用户输入），仅做基本健全性检查
+            if let Some(k) = ws.ssh_key.as_deref() {
+                if k.chars().any(|c| c.is_control()) {
+                    bail!("SSH 私钥路径不能含控制字符");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// 测试 workspace 连接。
 ///
 /// - `Local`：检查 claude_path / codex_path 是否存在，返回多行报告
-/// - `Ssh`：调用 `crate::ssh::test`（阶段 6 实现，目前直接报错）
+/// - `Ssh`：调用 `crate::ssh::test`
 ///
 /// 返回的字符串可直接渲染到 UI 的 StatusBanner。
 pub async fn test_connection(ws: &Workspace) -> anyhow::Result<String> {
+    validate(ws)?;
     match ws.kind {
         WorkspaceKind::Local => Ok(test_local(ws)),
         WorkspaceKind::Ssh => crate::ssh::test(ws).await,
@@ -159,5 +199,73 @@ mod tests {
             assert!(expanded.starts_with(home_s.as_ref()));
             assert!(expanded.ends_with(".claude"));
         }
+    }
+
+    // -------- validate --------
+
+    fn ssh_ws() -> Workspace {
+        Workspace {
+            id: "w".into(),
+            name: "S".into(),
+            kind: WorkspaceKind::Ssh,
+            host: Some("example.com".into()),
+            user: Some("alice".into()),
+            port: Some(22),
+            ssh_key: None,
+            claude_path: None,
+            codex_path: None,
+            tools: vec![],
+        }
+    }
+
+    #[test]
+    fn validate_accepts_normal_ssh_workspace() {
+        assert!(validate(&ssh_ws()).is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_dash_prefix_host() {
+        let mut ws = ssh_ws();
+        ws.host = Some("-oProxyCommand=evil".into());
+        assert!(validate(&ws).is_err(), "应拒绝 OpenSSH 选项注入");
+    }
+
+    #[test]
+    fn validate_rejects_dash_prefix_user() {
+        let mut ws = ssh_ws();
+        ws.user = Some("-oUser=root".into());
+        assert!(validate(&ws).is_err());
+    }
+
+    #[test]
+    fn validate_rejects_shell_metachars_in_host() {
+        let mut ws = ssh_ws();
+        ws.host = Some("example.com;rm -rf /".into());
+        assert!(validate(&ws).is_err());
+    }
+
+    #[test]
+    fn validate_rejects_empty_name() {
+        let mut ws = ssh_ws();
+        ws.name = "  ".into();
+        assert!(validate(&ws).is_err());
+    }
+
+    #[test]
+    fn validate_local_only_checks_name() {
+        let ws = Workspace {
+            id: String::new(),
+            name: "本机".into(),
+            kind: WorkspaceKind::Local,
+            ..Default::default()
+        };
+        assert!(validate(&ws).is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_control_chars_in_ssh_key() {
+        let mut ws = ssh_ws();
+        ws.ssh_key = Some("~/.ssh/id_rsa\n".into());
+        assert!(validate(&ws).is_err());
     }
 }

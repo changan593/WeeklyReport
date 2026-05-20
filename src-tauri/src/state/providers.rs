@@ -5,6 +5,7 @@ use uuid::Uuid;
 
 use crate::llm::LlmProvider;
 use crate::store;
+use crate::validate;
 
 use super::F_PROVIDERS;
 
@@ -22,9 +23,26 @@ pub fn save_provider(mut p: LlmProvider) -> Result<LlmProvider> {
     if p.name.trim().is_empty() {
         bail!("LLM 源名称不能为空");
     }
+    if p.name.len() > 64 {
+        bail!("LLM 源名称过长");
+    }
     let new_id = p.id.is_empty();
     if new_id {
         p.id = Uuid::new_v4().to_string();
+    } else {
+        validate::id(&p.id)?;
+    }
+    // base_url 不允许换行/控制字符（防止意外注入到将来的 URL 拼接逻辑）
+    if p.base_url.chars().any(|c| c.is_control()) {
+        bail!("base_url 含控制字符");
+    }
+    // API key 不允许换行（lettre/HTTP 头部 CRLF 注入兜底）
+    if p.api_key.contains('\r') || p.api_key.contains('\n') {
+        bail!("API key 不能含换行");
+    }
+    // model 不允许换行/控制字符；它会被 Gemini 协议直接拼到 URL 路径中
+    if p.model.chars().any(|c| c.is_control()) {
+        bail!("model 含控制字符");
     }
 
     let mut list = list_providers()?;
@@ -62,7 +80,35 @@ pub fn save_provider(mut p: LlmProvider) -> Result<LlmProvider> {
 }
 
 /// 删除 provider。若删除的是当前 default，则把剩余的第一个升级为 default。
+///
+/// 安全：删除前检查是否被 template / schedule 引用，若有则报错并列出引用方，
+/// 让用户先解除引用再删。
 pub fn delete_provider(id: &str) -> Result<()> {
+    validate::id(id)?;
+    // 检查引用方
+    let templates = super::templates::list_templates()?;
+    let used_by_templates: Vec<String> = templates
+        .iter()
+        .filter(|t| t.provider_id.as_deref() == Some(id))
+        .map(|t| t.name.clone())
+        .collect();
+    let schedules = super::schedules::list_schedules()?;
+    let used_by_schedules: Vec<String> = schedules
+        .iter()
+        .filter(|s| s.provider_id.as_deref() == Some(id))
+        .map(|s| s.name.clone())
+        .collect();
+    if !used_by_templates.is_empty() || !used_by_schedules.is_empty() {
+        let mut msgs = Vec::new();
+        if !used_by_templates.is_empty() {
+            msgs.push(format!("模板: {}", used_by_templates.join(", ")));
+        }
+        if !used_by_schedules.is_empty() {
+            msgs.push(format!("定时任务: {}", used_by_schedules.join(", ")));
+        }
+        bail!("无法删除：以下条目正在引用此 LLM 源 - {}", msgs.join("; "));
+    }
+
     let mut list = list_providers()?;
     let pos = match list.iter().position(|x| x.id == id) {
         Some(i) => i,

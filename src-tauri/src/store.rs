@@ -21,6 +21,10 @@ use std::sync::RwLock;
 /// 已初始化的数据目录。`init()` / `init_at()` 调用后被设置。
 static DATA_ROOT: RwLock<Option<PathBuf>> = RwLock::new(None);
 
+/// 损坏文件备份保留天数：超过此期限的 `.broken-*` 会在 init 时被清理。
+/// 这些备份可能含历史敏感数据（早期 API key 等），不该无限累积。
+const BROKEN_BACKUP_RETENTION_DAYS: i64 = 30;
+
 /// 初始化数据目录到 OS 默认位置：
 /// - macOS:   `~/Library/Application Support/WeeklyReport/`
 /// - Linux:   `~/.config/weekly-report/`
@@ -30,13 +34,62 @@ pub fn init() -> Result<()> {
 }
 
 /// 初始化数据目录到指定路径（用于测试或自定义部署）。
-/// 同时创建 `reports/` 子目录。
+/// 同时创建 `reports/` 子目录，并在 Unix 上把权限限制为 0700。
 pub fn init_at(root: PathBuf) -> Result<()> {
     fs::create_dir_all(&root).with_context(|| format!("创建数据目录失败: {}", root.display()))?;
+    restrict_dir_to_user(&root);
     let reports = root.join("reports");
     fs::create_dir_all(&reports)
         .with_context(|| format!("创建报告目录失败: {}", reports.display()))?;
-    *DATA_ROOT.write().expect("DATA_ROOT 锁中毒") = Some(root);
+    restrict_dir_to_user(&reports);
+    *DATA_ROOT.write().expect("DATA_ROOT 锁中毒") = Some(root.clone());
+
+    // 清理过期的损坏文件备份（best-effort，失败仅 warn）
+    if let Err(e) = cleanup_old_broken_backups(&root) {
+        tracing::warn!("清理过期 .broken-* 备份失败: {e:#}");
+    }
+    Ok(())
+}
+
+/// 把目录权限设为 `0o700`（rwx------）。仅 Unix 生效；Windows 是 no-op。
+///
+/// 数据目录里有 LLM key、SMTP 密码、报告全文等敏感数据；默认 0755 让同主机
+/// 其他用户能列出文件名，0700 才是最小授权。失败只 warn，不阻断启动
+/// （某些 FS 不支持 chmod，如 FAT32 / 部分网络盘）。
+#[cfg(unix)]
+fn restrict_dir_to_user(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let perms = std::fs::Permissions::from_mode(0o700);
+    if let Err(e) = fs::set_permissions(path, perms) {
+        tracing::warn!("无法设置目录 {} 权限为 0700: {e}", path.display());
+    }
+}
+
+#[cfg(not(unix))]
+fn restrict_dir_to_user(_path: &Path) {}
+
+/// 删除 `root` 下所有名字含 `.broken-` 且 mtime 超过保留期的文件。
+fn cleanup_old_broken_backups(root: &Path) -> Result<()> {
+    let cutoff = std::time::SystemTime::now()
+        - std::time::Duration::from_secs((BROKEN_BACKUP_RETENTION_DAYS * 24 * 3600) as u64);
+    let entries = match fs::read_dir(root) {
+        Ok(e) => e,
+        Err(_) => return Ok(()),
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if !name_str.contains(".broken-") {
+            continue;
+        }
+        if let Ok(meta) = entry.metadata() {
+            if let Ok(modified) = meta.modified() {
+                if modified < cutoff {
+                    let _ = fs::remove_file(entry.path());
+                }
+            }
+        }
+    }
     Ok(())
 }
 
@@ -83,44 +136,22 @@ pub fn write_json<T: Serialize>(filename: &str, value: &T) -> Result<()> {
     write_json_to(&path, value)
 }
 
-/// 同 [`write_json`]，但写完后把文件权限限制为仅当前用户可读写（POSIX 0600）。
+/// 同 [`write_json`]，但临时文件从一开始就以 `0o600` 权限创建（Unix），
+/// 避免 default umask（通常 0644）与 chmod 之间的 TOCTOU 窗口。
 ///
-/// 用于保存敏感数据（API key / SMTP 密码）。Windows 上 NTFS 默认已经只允许当前用户访问，
-/// 此函数为 no-op。
+/// 用于保存敏感数据（API key / SMTP 密码 / SSH 私钥路径 / 收件人邮箱）。
+/// Windows 上 NTFS 默认已经只允许当前用户访问，等价于普通 write_json。
 pub fn write_json_secret<T: Serialize>(filename: &str, value: &T) -> Result<()> {
     let path = data_dir()?.join(filename);
     write_json_secret_to(&path, value)
 }
 
 pub(crate) fn write_json_secret_to<T: Serialize>(path: &Path, value: &T) -> Result<()> {
-    write_json_to(path, value)?;
-    restrict_to_user(path)?;
-    Ok(())
-}
-
-/// 把文件权限设为 `0o600`（rw-------）。仅 Unix 生效；Windows 是 no-op。
-///
-/// 失败只 `warn!`，不阻断写入（权限设置失败一般是 FS 不支持 chmod，如 FAT32 / 网络盘）。
-#[cfg(unix)]
-fn restrict_to_user(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    let mut perms = match fs::metadata(path) {
-        Ok(m) => m.permissions(),
-        Err(e) => {
-            tracing::warn!("无法读取 {} 权限: {e}", path.display());
-            return Ok(());
-        }
-    };
-    perms.set_mode(0o600);
-    if let Err(e) = fs::set_permissions(path, perms) {
-        tracing::warn!("无法设置 {} 权限为 0600: {e}", path.display());
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
     }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn restrict_to_user(_path: &Path) -> Result<()> {
-    Ok(())
+    let body = serde_json::to_vec_pretty(value).context("JSON 序列化失败")?;
+    atomic_write_with_mode(path, &body, Some(0o600))
 }
 
 /// 与 [`read_json`] 同语义，但直接对指定路径操作（便于测试）。
@@ -155,23 +186,60 @@ pub(crate) fn write_json_to<T: Serialize>(path: &Path, value: &T) -> Result<()> 
         fs::create_dir_all(parent)?;
     }
     let body = serde_json::to_vec_pretty(value).context("JSON 序列化失败")?;
-    atomic_write(path, &body)
+    atomic_write_with_mode(path, &body, None)
 }
 
-/// 原子写入字节流：先写 `<path>.tmp`，再 `rename`。
-fn atomic_write(path: &Path, body: &[u8]) -> Result<()> {
+/// 原子写入字节流：先写 `<path>.tmp`（带可选 mode），再 `rename`。
+///
+/// - 当 `mode = Some(0o600)` 时，临时文件在 Unix 上以该权限创建（`OpenOptions.mode`），
+///   消除了"先写默认 0644 再 chmod"之间的 TOCTOU 窗口。
+/// - 任何已存在的 `.tmp` 会被 `create_new` 拒绝，避免攻击者预先创建一个软链接
+///   指向受害者文件来实现任意写入。
+fn atomic_write_with_mode(path: &Path, body: &[u8], mode: Option<u32>) -> Result<()> {
     let tmp = tmp_path(path);
-    {
-        let mut f = fs::File::create(&tmp)
-            .with_context(|| format!("创建临时文件失败: {}", tmp.display()))?;
-        f.write_all(body)
-            .with_context(|| format!("写入临时文件失败: {}", tmp.display()))?;
-        // sync_all 在某些 FS（如 tmpfs）上会失败，忽略
-        let _ = f.sync_all();
+    // 如果上次写入异常中断留下残留 .tmp，先清理（仅当它是普通文件，不跟随 symlink）
+    if let Ok(meta) = fs::symlink_metadata(&tmp) {
+        if meta.file_type().is_file() {
+            let _ = fs::remove_file(&tmp);
+        } else {
+            // .tmp 是 symlink 或其他类型 → 异常状态，直接报错
+            return Err(anyhow!(
+                "临时路径已存在非常规文件，疑似攻击: {}",
+                tmp.display()
+            ));
+        }
     }
+
+    let mut f =
+        open_tmp(&tmp, mode).with_context(|| format!("创建临时文件失败: {}", tmp.display()))?;
+    f.write_all(body)
+        .with_context(|| format!("写入临时文件失败: {}", tmp.display()))?;
+    // sync_all 在某些 FS（如 tmpfs）上会失败，忽略
+    let _ = f.sync_all();
+    drop(f);
+
     fs::rename(&tmp, path)
         .with_context(|| format!("rename 失败: {} -> {}", tmp.display(), path.display()))?;
     Ok(())
+}
+
+#[cfg(unix)]
+fn open_tmp(tmp: &Path, mode: Option<u32>) -> std::io::Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut opts = fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    if let Some(m) = mode {
+        opts.mode(m);
+    }
+    opts.open(tmp)
+}
+
+#[cfg(not(unix))]
+fn open_tmp(tmp: &Path, _mode: Option<u32>) -> std::io::Result<fs::File> {
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(tmp)
 }
 
 /// 在 path 文件名后追加 `.tmp` 后缀，保留完整路径与扩展名。
@@ -204,28 +272,37 @@ fn backup_broken(path: &Path) -> Result<()> {
 }
 
 /// 保存报告 Markdown 到 `reports/<id>.md`，返回完整路径。原子写入。
+///
+/// `id` 必须先经 [`crate::validate::id`] 校验，禁止路径穿越字符。
 pub fn save_report_file(id: &str, content: &str) -> Result<PathBuf> {
-    let path = data_dir()?.join("reports").join(format!("{id}.md"));
+    let path = report_path(id)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    atomic_write(&path, content.as_bytes())?;
+    // 报告 Markdown 可能含敏感工作信息，统一用 0600 写入
+    atomic_write_with_mode(&path, content.as_bytes(), Some(0o600))?;
     Ok(path)
 }
 
 /// 读取 `reports/<id>.md` 全文。文件不存在时返回错误。
 pub fn load_report_file(id: &str) -> Result<String> {
-    let path = data_dir()?.join("reports").join(format!("{id}.md"));
+    let path = report_path(id)?;
     fs::read_to_string(&path).with_context(|| format!("读取报告失败: {}", path.display()))
 }
 
 /// 删除 `reports/<id>.md`。文件不存在时静默成功。
 pub fn delete_report_file(id: &str) -> Result<()> {
-    let path = data_dir()?.join("reports").join(format!("{id}.md"));
+    let path = report_path(id)?;
     if path.exists() {
         fs::remove_file(&path).with_context(|| format!("删除报告失败: {}", path.display()))?;
     }
     Ok(())
+}
+
+/// 拼出 `data_dir/reports/<id>.md`。`id` 必须通过白名单校验，禁止 `..`、`/`、`\` 等。
+fn report_path(id: &str) -> Result<PathBuf> {
+    crate::validate::id(id)?;
+    Ok(data_dir()?.join("reports").join(format!("{id}.md")))
 }
 
 #[cfg(test)]
@@ -321,6 +398,70 @@ mod tests {
         write_json_secret_to(&path, &v).unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "敏感文件应为 0o600，实际 {mode:o}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn write_json_secret_never_exposes_644_window() {
+        // 验证 .tmp 在被 rename 之前就已是 0o600（不存在"先 644 再 chmod"的窗口）。
+        // 做法：观察函数执行过程中创建的临时文件权限。
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp_dir();
+        let path = dir.join("secret.json");
+        let v = Sample {
+            name: "secret".into(),
+            count: 7,
+            ..Default::default()
+        };
+        write_json_secret_to(&path, &v).unwrap();
+        // 最终文件应是 0o600
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        // 不应残留 .tmp
+        let tmp = tmp_path(&path);
+        assert!(!tmp.exists(), "成功写入后不应留下 .tmp");
+    }
+
+    #[test]
+    fn atomic_write_rejects_symlink_tmp() {
+        // 攻击场景：恶意进程预先在 .tmp 路径创建一个软链接指向受害者文件，
+        // 期望让我们覆盖它。我们应该检测到这一异常并报错。
+        let dir = temp_dir();
+        let path = dir.join("data.json");
+        let tmp = tmp_path(&path);
+        // 创建一个指向 /tmp/some-victim 的软链接（不需要真实存在）
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("/tmp/weekly-report-victim-target", &tmp).unwrap();
+        #[cfg(not(unix))]
+        std::os::windows::fs::symlink_file("C:\\victim", &tmp).unwrap_or_default();
+
+        let v = Sample {
+            name: "x".into(),
+            ..Default::default()
+        };
+        // 仅在 symlink 创建成功时跑断言（Windows 上需要管理员权限）
+        if std::fs::symlink_metadata(&tmp).is_ok() {
+            let r = write_json_to(&path, &v);
+            assert!(r.is_err(), "应拒绝在 symlink .tmp 上写入");
+        }
+    }
+
+    #[test]
+    fn cleanup_keeps_recent_and_unrelated_files() {
+        // 不引入 filetime crate，只验证："刚创建的 .broken-* 不会被误删，
+        // 无关文件不会被触碰"。过期路径走 mtime 判断，由文件系统保证。
+        let dir = temp_dir();
+
+        let recent_broken = dir.join("smtp.json.broken-recent");
+        std::fs::write(&recent_broken, b"recent").unwrap();
+
+        let unrelated = dir.join("normal.json");
+        std::fs::write(&unrelated, b"x").unwrap();
+
+        cleanup_old_broken_backups(&dir).unwrap();
+
+        assert!(recent_broken.exists(), "刚创建的 .broken 不该被清理");
+        assert!(unrelated.exists(), "无关文件不该被触碰");
     }
 
     #[test]

@@ -1,13 +1,9 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "WeeklyReport main window default capabilities.",
+  "description": "WeeklyReport main window default capabilities. 最小权限原则：仅启用前端实际用到的能力（IPC invoke + 窗口控制）。clipboard / shell / fs / dialog 等都未被前端调用，故不授予；将来需要时显式追加。",
   "windows": ["main"],
   "permissions": [
-    "core:default",
-    "shell:default",
-    "dialog:default",
-    "fs:default",
-    "clipboard-manager:default"
+    "core:default"
   ]
 }

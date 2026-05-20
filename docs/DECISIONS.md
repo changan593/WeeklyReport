@@ -285,6 +285,73 @@ LLM API key 和 SMTP 密码需要持久化。
 
 ---
 
+## ADR-012：SSH 主机密钥校验用 accept-new 而非 no
+
+**状态：** ✅ 已接受（v0.1.0 安全审查后从 `no` 升级）
+
+**背景：**
+
+最初使用 `StrictHostKeyChecking=no` 是为了让首次连接不卡 known_hosts。但 `no` 不仅跳过
+首次校验，**也跳过 host key 变更检测**——服务器换公钥（重装系统）或被 MITM 时，rsync
+不会报警直接拉流量，可能把伪造的 jsonl 拉到本地并发进周报里。
+
+**决策：** 改为 `StrictHostKeyChecking=accept-new`。
+
+**含义：**
+- 首次连接：自动写入 `~/.ssh/known_hosts`，等同 `no` 的易用性
+- 之后变更：立即报错（`REMOTE HOST IDENTIFICATION HAS CHANGED`）
+- 用户体验代价为零，安全性大幅提升
+
+**配套修改：**
+- `format_ssh_error` 识别 host key 不一致错误并给出明确中文提示（含"不要盲删 known_hosts"
+  的警告 + 让用户联系管理员核对指纹）
+- README 与 UI 的 SSH 表单都加了 TOFU 说明
+
+---
+
+## ADR-013：输入校验集中在 `validate` 模块（白名单）
+
+**状态：** ✅ 已接受
+
+**背景：**
+
+v0.1.0 早期实现中，host / user / id 等字段直接从 IPC 落进 shell 命令 / 文件路径，
+潜在风险：
+- OpenSSH 把 `-oProxyCommand=...` 当成命令行选项
+- 报告 ID 含 `../../` 实施任意文件删除
+- 邮件主题/from_name 含 `\r\nBcc: evil@…` 实施头注入
+
+**决策：** 单建 `src/validate.rs` 模块，提供 `id` / `ssh_host` / `ssh_user` /
+`email` / `mail_header_text` 等白名单校验。在边界处（IPC handler、state 层 save 函数、
+ssh.rs / email.rs 命令执行前）统一调用。
+
+**理由：**
+- 黑名单（"escape 特殊字符"）容易遗漏；白名单（"只允许这些字符"）一目了然
+- 集中实现便于审计，新加一类字段时强制开发者来这个模块加规则
+- 单元测试集中跑过攻击 payload，回归保护
+
+---
+
+## ADR-014：tauri capabilities 收紧到 core:default
+
+**状态：** ✅ 已接受
+
+**背景：**
+
+初始 `capabilities/default.json` 授予了 `shell:default` / `dialog:default` /
+`fs:default` / `clipboard-manager:default`，但前端代码并未调用任何对应 API。这等于
+开了一堆"以防万一"的能力。
+
+**决策：** capabilities 只保留 `core:default`。插件初始化保留（代码不动），
+但前端即便被 XSS 也无法触发 fs / shell / dialog / clipboard 能力。复制功能用浏览器
+原生 `navigator.clipboard.writeText`。
+
+**配套：** Tauri CSP 从 `null` 改为白名单：`default-src 'self'`,
+`script-src 'self'`（禁内联与 eval），`connect-src` 只允许 IPC（前端不可直接发外网
+请求；所有 LLM 调用必须通过后端）。
+
+---
+
 ## 路线图（未来决策）
 
 以下条目尚未做正式决策，待 v0.2.0+ 评估：

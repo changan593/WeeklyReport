@@ -81,6 +81,16 @@ export default function Providers() {
         </PrimaryButton>
       </header>
 
+      {/* 隐私警示：用户应清楚自己的开发数据会被发送到哪里 */}
+      <div className="mb-4 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-[12.5px] text-amber-800">
+        <div className="font-medium">⚠ 数据流向提示</div>
+        <div className="mt-0.5 text-[12px] text-amber-700">
+          生成周报时，你的工作指令原文（user prompt）、项目名、服务器名都会被发送给所选 LLM
+          的服务器。若工作内容敏感，建议选择「本地 Ollama / vLLM」预设；云端 endpoint
+          意味着数据离开你的设备。
+        </div>
+      </div>
+
       {loading && <LoadingState />}
       {!loading && items && items.length === 0 && (
         <EmptyState iconName="llm" message="还没有 LLM 源">
@@ -310,7 +320,10 @@ function ProviderEditor({ initial, presets, onClose, onSaved }) {
           />
         </FormField>
 
-        <FormField label="API Key" hint="本地明文保存，存放于 data_dir 的 llm_providers.json">
+        <FormField
+          label="API Key"
+          hint="⚠ v0.1.0 明文保存在 llm_providers.json（文件权限 0600）。同主机的其他进程仍可读到，请勿在共享机器使用。v0.2.0 将接入 keyring 加密。"
+        >
           <Mono
             value={p.api_key}
             onChange={(v) => set('api_key', v)}

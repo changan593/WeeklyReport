@@ -109,6 +109,11 @@ pub struct HttpRequest {
 }
 
 const HTTP_TIMEOUT: Duration = Duration::from_secs(120);
+/// 单次 LLM 响应允许的最大字节数。
+///
+/// 防御恶意 / 故障 LLM 返回 GB 级响应导致 OOM。10 MB 对于周报生成完全够用
+/// （LLM 输出 token 上限通常 8K–32K，对应 ~100 KB 文本）。
+const HTTP_MAX_RESPONSE_BYTES: u64 = 10 * 1024 * 1024;
 
 // ============================================================
 // 入口
@@ -187,7 +192,31 @@ async fn post_json(req: &HttpRequest) -> Result<(u16, String)> {
         .await
         .with_context(|| format!("HTTP 请求失败: {}", req.url))?;
     let status = response.status().as_u16();
-    let body = response.text().await.context("读取响应体失败")?;
+
+    // Content-Length 早拒：如果响应头声明的长度就超限，直接报错，连 body 都不读。
+    if let Some(len) = response.content_length() {
+        if len > HTTP_MAX_RESPONSE_BYTES {
+            return Err(anyhow!(
+                "LLM 响应过大（声明 {len} 字节，上限 {HTTP_MAX_RESPONSE_BYTES}）。\
+                 可能是端点配置错误或被劫持。"
+            ));
+        }
+    }
+
+    // 流式读取（用 reqwest 自带的 `chunk()`，避免新增 futures-util 直接依赖）
+    // 累计到上限立即中断，保护内存。
+    let mut response = response;
+    let mut buf: Vec<u8> = Vec::with_capacity(8 * 1024);
+    while let Some(chunk) = response.chunk().await.context("读取响应体失败")? {
+        if (buf.len() as u64) + (chunk.len() as u64) > HTTP_MAX_RESPONSE_BYTES {
+            return Err(anyhow!(
+                "LLM 响应超过 {HTTP_MAX_RESPONSE_BYTES} 字节上限（已读 {} 字节）",
+                buf.len()
+            ));
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    let body = String::from_utf8(buf).context("响应不是合法 UTF-8")?;
     Ok((status, body))
 }
 

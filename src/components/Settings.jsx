@@ -230,7 +230,10 @@ export default function Settings() {
               placeholder="you@example.com"
             />
           </FormField>
-          <FormField label="密码 / 授权码">
+          <FormField
+            label="密码 / 授权码"
+            hint="⚠ 明文保存在 smtp.json（0600）。建议使用「应用专用密码 / 授权码」而非账户密码：被泄露时只影响 SMTP 发件，不至于丢账号。"
+          >
             <Input
               type="password"
               value={cfg.password}
