@@ -125,16 +125,21 @@ WeeklyReport 是一个跨平台桌面应用，提供以下核心能力：
 
 ### 压缩规则
 
-| 内容类型           | 处理方式                                          |
-| ------------------ | ------------------------------------------------- |
-| 用户指令 (user)    | **全文保留**（这是核心工作信号，不可丢失）        |
-| AI 文本回复        | 保留首 N 字符 + 末 N 字符，中间用 `…` 替代       |
-| Tool use           | 仅保留工具名 + 一个关键参数（如 file_path）       |
-| Tool result        | **完全丢弃**                                      |
-| Thinking blocks    | 完全丢弃                                          |
-| 连续相似指令       | 前 30 字符相同的相邻指令视为重复，自动去重        |
+| 内容类型                            | 处理方式                                          |
+| ----------------------------------- | ------------------------------------------------- |
+| 用户指令 (真实 user prompt)         | **全文保留**（这是核心工作信号，不可丢失）        |
+| AI 文本回复                         | 保留首 N 字符 + 末 N 字符，中间用 `…` 替代       |
+| Tool use                            | 仅保留工具名 + 一个关键参数（如 file_path）       |
+| Tool result                         | **完全丢弃**                                      |
+| Thinking / Reasoning blocks         | 完全丢弃                                          |
+| Meta / summary / git-commit / event_msg / compacted | 完全丢弃                          |
+| 连续相似指令                        | 前 30 字符相同的相邻指令视为重复，自动去重        |
 
 `N` 默认为 200，可在设置中调整。
+
+> **重要陷阱**：Claude Code 中 `type:"user"` 不一定是真实用户指令；
+> 当行携带 `toolUseResult` 字段或 `message.content` 是数组时，实质上是 tool result 反灌，必须按 tool result 丢弃。
+> 详见 [JSONL.md §4.4](./JSONL.md#44-真实用户消息判别关键陷阱)。
 
 ### 日志文件位置
 
@@ -142,19 +147,19 @@ WeeklyReport 是一个跨平台桌面应用，提供以下核心能力：
   - 全局 `~/.claude/history.jsonl`
   - 各 session：`~/.claude/projects/<encoded-path>/<session-id>.jsonl`
 - Codex CLI：
-  - `~/.codex/sessions/YYYY/MM/DD/rollout-<timestamp>-<id>.jsonl`
+  - 各 session：`~/.codex/sessions/YYYY/MM/DD/rollout-<timestamp>-<id>.jsonl`
+  - 全局（可选）：`~/.codex/history.jsonl`
 
-读取时按修改时间过滤，只保留指定天数内的文件。
+读取时按文件修改时间过滤，只保留指定天数内的文件。
 
 ### JSONL 格式适配
 
-Claude Code 和 Codex CLI 的 JSONL 格式不完全相同，需要兼容：
+Claude Code 和 Codex CLI 的 JSONL 结构差异较大，需要分别适配：
 
-- Claude Code 的 history.jsonl：每行包含 `prompt` 和 `projectPath` 字段
-- Claude Code 的 session JSONL：每行有 `message: {role, content}` 结构
-- Codex 的 rollout JSONL：类似 Claude，但字段名可能略有差异
+- **Claude Code** 用顶层 `type` 字段区分用户/助手/工具，`message.content` 是 string 或 typed-block 数组
+- **Codex CLI** 用 `type` + `payload` 两段嵌套，`response_item.payload.type` 再区分 message/reasoning/function_call 等
 
-实现时需检查实际样本（参考 [ARCHITECTURE.md](./ARCHITECTURE.md) 中的样本片段）。
+每个 CLI 在版本间还会有 schema 漂移。**所有字段定义与版本兼容矩阵详见 [JSONL.md](./JSONL.md)。** 实现时统一用 `serde_json::Value` 容错解析，不硬声明 struct。
 
 ### 输出格式
 

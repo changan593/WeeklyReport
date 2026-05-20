@@ -163,33 +163,20 @@ pub struct Summary {
 }
 ```
 
-**JSONL 格式适配（实际样本）：**
+**JSONL 格式适配（完整定义见 [JSONL.md](./JSONL.md)）：**
 
-Claude Code 全局 `history.jsonl`：
-
-```jsonl
-{"prompt":"帮我把 SQLite 换成 JSON","timestamp":"2026-05-17T10:23:45Z","projectPath":"/Users/me/weekly-report"}
-```
-
-Claude Code session JSONL（`projects/<encoded>/<session>.jsonl`）：
-
-```jsonl
-{"type":"user","message":{"role":"user","content":"修一下 schedule 的 cron 解析"},"timestamp":"...","sessionId":"..."}
-{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"我先看看 scheduler.rs"},{"type":"tool_use","name":"Read","input":{"file_path":"src/scheduler.rs"}}]},"timestamp":"..."}
-```
-
-Codex CLI rollout JSONL（`sessions/2026/05/17/rollout-*.jsonl`）：
-
-```jsonl
-{"role":"user","content":"重构这个模块","ts":"2026-05-17T..."}
-```
+- **Claude Code `history.jsonl`**：仅用户 prompt，字段 `display` / `timestamp(ms)` / `project` / `pastedContents`
+- **Claude Code 项目 session JSONL**（`projects/<encoded-cwd>/<sessionId>.jsonl`）：每行顶层 `type` + `message{role,content}`；`content` 是字符串或 typed-block 数组（`text` / `tool_use` / `tool_result` / `thinking`）；**陷阱**：`type:"user"` + `toolUseResult` 是 tool result 反灌
+- **Codex rollout JSONL**：`{timestamp, type, payload}` 两段嵌套；`type` 一级（`session_meta` / `response_item` / `event_msg` / `compacted` / `turn_context`）；`response_item.payload.type` 二级（`message` / `reasoning` / `function_call` / `function_call_output` / ...）；message content 永远是数组（`input_text` / `output_text` / `input_image`）
 
 **实现注意：**
-- 用 `serde_json::Value` 灵活解析（不要硬编码结构体匹配所有格式）
-- 文件按修改时间筛选，只保留 since 之内的
-- `infer_project()` 从路径推断项目名：Claude Code 用 `projects/<encoded>` 路径解码；其他用文件名 stem
-- 输出的 user prompt **保留全文**；assistant 的 text 截首尾各 200 字符
-- Tool use 形如 `[读文件: src/scheduler.rs]`，参数长度上限 60 字符
+- 用 `serde_json::Value` 灵活解析，不硬编码 struct（两边 schema 在版本间漂移，Codex 已有 3 套兼容格式）
+- 文件按修改时间筛选，只保留 since 之内的；单行/单文件失败 `warn!` 后 continue，不阻塞整体
+- `infer_project()` **优先取 `cwd` 末段**（Claude session JSONL 的 `cwd` 字段、Codex `session_meta.payload.cwd`）；history.jsonl 退路用 `project` 末段；最后退路用文件名 stem
+- 输出的 user prompt 全文保留；assistant `text` / Codex `output_text` 截首尾各 N 字符（默认 200）
+- Tool use / function_call 输出形如 `[Read: src/scheduler.rs]`，参数长度上限 60 字符
+- Codex `function_call.arguments` 是 JSON 字符串，需 `serde_json::from_str` 二次解析
+- Claude `type:"user"` 真伪判别：`message.content` 必须是字符串、`toolUseResult` 必须不存在、`isMeta` 必须不为 true
 
 ### 3.6 `llm.rs` — 多 LLM 源协议抽象
 
