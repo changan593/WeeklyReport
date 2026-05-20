@@ -101,6 +101,26 @@ export function saveSettings(settings) {
 }
 
 // ============================================================
+// SMTP
+// ============================================================
+
+export function getSmtpConfig() {
+  return invoke('get_smtp_config');
+}
+
+export function saveSmtpConfig(config) {
+  return invoke('save_smtp_config', { config });
+}
+
+export function testSmtpConfig(config) {
+  return invoke('test_smtp_config', { config });
+}
+
+export function sendTestEmail(config, to) {
+  return invoke('send_test_email', { req: { config, to } });
+}
+
+// ============================================================
 // Misc
 // ============================================================
 

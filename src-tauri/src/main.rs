@@ -14,6 +14,7 @@ mod store;
 mod workspace;
 
 use chrono::Local;
+use email::{EmailRequest, SmtpConfig};
 use llm::LlmProvider;
 use report::{ReportRecord, Template};
 use serde::{Deserialize, Serialize};
@@ -66,6 +67,11 @@ fn main() {
             // Settings
             get_settings,
             save_settings,
+            // SMTP
+            get_smtp_config,
+            save_smtp_config,
+            test_smtp_config,
+            send_test_email,
             // Misc
             data_dir_path,
         ])
@@ -346,4 +352,52 @@ fn get_settings() -> Result<Settings, String> {
 #[tauri::command]
 fn save_settings(settings: Settings) -> Result<(), String> {
     state::save_settings(&settings).map_err(err_to_string)
+}
+
+// ============================================================
+// SMTP
+// ============================================================
+
+#[tauri::command]
+async fn get_smtp_config() -> Result<SmtpConfig, String> {
+    state::get_smtp_config().map_err(err_to_string)
+}
+
+#[tauri::command]
+async fn save_smtp_config(config: SmtpConfig) -> Result<(), String> {
+    state::save_smtp_config(&config).map_err(err_to_string)
+}
+
+#[tauri::command]
+async fn test_smtp_config(config: SmtpConfig) -> Result<String, String> {
+    email::test_smtp(&config).await.map_err(err_to_string)
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct TestEmailRequest {
+    config: SmtpConfig,
+    to: String,
+}
+
+#[tauri::command]
+async fn send_test_email(req: TestEmailRequest) -> Result<String, String> {
+    let recipient = req.to.trim().to_string();
+    if recipient.is_empty() {
+        return Err("收件人为空".into());
+    }
+    let body = EmailRequest {
+        to: vec![recipient.clone()],
+        cc: vec![],
+        subject: "WeeklyReport 测试邮件".into(),
+        body_markdown: format!(
+            "# WeeklyReport 测试邮件\n\n如果你看到这封邮件，说明 SMTP 已配置成功。\n\n- 发件人：`{}`\n- 收件人：`{}`\n- 时间：{}\n",
+            req.config.username,
+            recipient,
+            Local::now().format("%Y-%m-%d %H:%M:%S")
+        ),
+    };
+    email::send(&req.config, &body)
+        .await
+        .map_err(err_to_string)?;
+    Ok(format!("✓ 测试邮件已发送到 {recipient}"))
 }
