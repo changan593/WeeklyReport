@@ -240,9 +240,12 @@ LLM API key 和 SMTP 密码需要持久化。
 
 **理由：**
 - `ssh2` crate 依赖 libssh2 + libssl 编译，麻烦且经常出问题
-- 用户的电脑必然已有 `ssh` 和 `rsync` 命令
+- 用户的电脑必然已有 `ssh` 命令；`tar` 也是 Windows 10 1803+ / macOS / Linux 默认自带
 - subprocess 调用简单可靠
-- 缺点：Windows 默认没有 rsync（但有 OpenSSH）→ Windows 用户需要自己装 rsync，README 中说明
+
+**历史变更：**
+- 早期实现用 `ssh + rsync` 同步，Windows 用户需另装 rsync
+- v0.1.0 发布前改为 `ssh + tar` 单向流（见 ADR-013），不再依赖 rsync
 
 ---
 
@@ -319,6 +322,69 @@ LLM API key 和 SMTP 密码需要持久化。
 - 未知 `type` 静默跳过，不报错
 - 单行 JSON 解析失败 → `warn!` + continue
 - 详细字段表 + 版本兼容矩阵见 [JSONL.md](./JSONL.md)
+
+---
+
+## ADR-013：放弃 rsync，改用 `ssh + tar` 单向流
+
+**状态：** ✅ 已接受
+
+**背景：**
+
+v0.1.0 早期实现用 `rsync -e ssh ...` 同步远端 `*.jsonl`。在 Windows 用户的 SSH
+工作区上出现稳定复现的失败：rsync 立即报 `connection unexpectedly closed (0
+bytes received)` + `error in rsync protocol data stream (code 12)`。
+
+`ssh -vv` 跟踪到根因：
+```
+debug2: channel 0: read failed rfd 4 maxlen 32768: Unknown error
+```
+
+ssh 子进程（Win32 OpenSSH）从 rsync 子进程（MSYS2/Cygwin）创建的 pipe 上 `ReadFile`
+失败 —— Cygwin 的 `fhandler_pipe` 句柄对 Win32 进程半透明，第一次双向数据交换就崩。
+属于跨进程模型（POSIX ↔ Win32）的 stdio 兼容问题，rsync 协议恰好要求双向握手，
+**所以一定踩**。
+
+绕过路径全部不理想：
+- 让 rsync 用 MSYS2 自己的 ssh：要求用户额外 `pacman -S openssh` 并把 `~/.ssh/`
+  搬到 MSYS2 HOME，复杂、易错
+- 装 cwrsync（自带配套 ssh）：要求用户装第三方包，违反"零额外依赖"目标
+- 走 WSL：违反"原生桌面应用"定位
+- 切换到 `ssh2` / `russh` crate：违反 ADR-010
+
+**选项：**
+
+| 方案                          | 优点                                              | 缺点                                  |
+| ----------------------------- | ------------------------------------------------- | ------------------------------------- |
+| 继续用 rsync + 文档警示       | 不动代码                                          | Windows 用户开箱即坏，违反"商业可用"    |
+| 给 Windows 单独写 sftp 分支   | 跨平台 ssh 客户端通常支持 sftp 子系统             | 两套实现，维护成本翻倍                |
+| **改用 `ssh ... 'tar c' \| tar x` 单向流** | 单 stdio 方向、无握手、用 OS 自带 tar | 全量同步而非增量                      |
+| 引入 Rust SSH/SFTP crate      | API 一致                                          | 违反 ADR-010，编译复杂度上升          |
+
+**决策：** 改用 `ssh ... 'cd <remote> && find . -name "*.jsonl" -print0 | tar
+--null -cf - -T -' | tar xf - -C <local>`。
+
+**理由：**
+- 整条数据链只用单向 stdio（ssh stdout → tar stdin），不触发 Cygwin/Win32
+  pipe 互读问题
+- 本地 tar 在 Windows 上显式优先 `%SystemRoot%\System32\tar.exe`（bsdtar，
+  Windows 10 1803+ 自带），与 Win32 ssh 同源
+- 远端 `find -print0` + `tar --null -T -` 用 NUL 分隔文件名，安全处理含特殊
+  字符的路径
+- 远端路径仍走 `sh_quote_remote_path` 转义，命令注入抵御不变
+- 与 ADR-010 一致：仍然是系统命令子进程，零新增 Rust 依赖
+
+**代价：**
+- 全量同步，无 rsync 的增量优化。但 Claude / Codex JSONL 日志典型 <10MB/工作区，
+  传输代价可忽略；定时周报场景下每次跑一次也完全可接受。
+
+**实现约束：**
+- 远端 tar 命令通过 `build_remote_tar_cmd(remote)` 构造，必须经
+  `sh_quote_remote_path` 转义
+- 本地 tar 命令通过 `local_tar_command()` 选择，Windows 优先 System32 全路径
+- ssh 进程 stdout 与 tar 进程 stdin 之间用 `tokio::io::copy` 异步搬运
+- ssh / tar 两端 stderr 各自后台 `read_to_end` 收集，主流程仅 wait status
+- ssh 退出非零 → `format_ssh_error`；tar 退出非零 → 单独的中文错误（exit + stderr 摘要）
 
 ---
 

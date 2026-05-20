@@ -224,7 +224,7 @@
 
 1. 实现 `ssh.rs`：
    - `test()`：用系统 `ssh` 命令测试连接
-   - `sync_to_cache()`：用 `rsync` 同步 *.jsonl 到本地缓存
+   - `sync_to_cache()`：用 `ssh + tar` 流式同步 *.jsonl 到本地缓存
 2. 在 `logs::collect_messages` 加入 SSH 分支：先同步到缓存再走本机解析逻辑
 3. 工作区编辑器支持 SSH 字段
 

@@ -13,6 +13,12 @@
 - 真实图标资源（替换占位 PNG，使用 `cargo tauri icon` 生成）
 - GitHub Actions CI（三平台并行构建 + tag 触发发布）
 
+### Changed
+- **SSH 远端日志同步从 rsync 改为 `ssh + tar` 单向流**（ADR-013）。Windows 用户
+  开箱即用，不再需要单独装 rsync；本地 tar 在 Windows 上优先用 System32 自带
+  bsdtar，避开 MSYS2 rsync ↔ Win32 OpenSSH 的 Cygwin/Win32 pipe 不兼容问题。
+  代价：全量同步取代增量，但 jsonl 日志体量小可忽略。
+
 ---
 
 ## [0.1.0] - 待发布
@@ -52,9 +58,10 @@
 - 历史报告作为风格参考（默认最近 2 份）
 
 **SSH 远程工作区（阶段 6）**
-- `ssh.rs` 使用系统 `ssh` + `rsync`（ADR-010）
+- `ssh.rs` 使用系统 `ssh` + `tar`（ADR-010 + ADR-013）
 - 安全选项：`BatchMode=yes` + `StrictHostKeyChecking=no` + `ConnectTimeout=8`
-- `sync_to_cache()` 只拉 `*.jsonl` 文件到 OS 缓存目录，保留目录结构
+- `sync_to_cache()` 用 `ssh ... 'tar c' | tar x` 单向流，只拉 `*.jsonl` 文件到 OS 缓存目录，保留目录结构
+- Windows 本地 tar 优先 `%SystemRoot%\System32\tar.exe`，规避 MSYS2 tar 与 Win32 ssh 的 pipe 不兼容
 - 错误信息中文化：超时 / 认证失败 / DNS / 网络不可达分别给出不同提示
 
 **SMTP 邮件（阶段 7）**

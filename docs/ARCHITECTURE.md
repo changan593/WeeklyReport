@@ -113,14 +113,15 @@ pub async fn test_connection(ws: &Workspace) -> Result<String>;
 
 ### 3.4 `ssh.rs` — SSH 客户端
 
-**职责：** 远程 SSH 测试 + rsync 日志同步。
+**职责：** 远程 SSH 测试 + `ssh + tar` 流式日志同步。
 
 **实现要点：**
 
-- **不**用 `ssh2` crate（编译复杂），改用系统 `ssh` 和 `rsync` 命令的 subprocess
+- **不**用 `ssh2` crate（编译复杂），改用系统 `ssh` 和 `tar` 命令的 subprocess
 - 用 `tokio::process::Command` 异步执行
 - 设置 `StrictHostKeyChecking=no` + `ConnectTimeout=8` + `BatchMode=yes`
-- rsync 只拉 `*.jsonl` 文件到本地缓存目录
+- 同步走 `ssh ... 'find ... | tar c' | tar x` 单向流（见 [DECISIONS.md ADR-013](./DECISIONS.md#adr-013放弃-rsync改用-ssh--tar-单向流)），只拉 `*.jsonl` 文件到本地缓存目录
+- Windows 上本地 tar 优先用 `%SystemRoot%\System32\tar.exe`，避免选到 MSYS2 tar 与 Win32 ssh 的 pipe 不兼容
 
 **核心 API：**
 

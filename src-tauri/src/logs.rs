@@ -9,7 +9,7 @@
 //! - [`codex`]：Codex CLI `~/.codex/sessions/.../rollout-*.jsonl`
 //! - [`compress`]：clip_text / path_basename 等工具
 //!
-//! 阶段 6 会在 [`collect_messages`] 里加 SSH 分支：先 rsync 到本地缓存再走本机逻辑。
+//! 阶段 6 会在 [`collect_messages`] 里加 SSH 分支：先 ssh+tar 流式拉到本地缓存再走本机逻辑。
 #![allow(dead_code)]
 
 use anyhow::{anyhow, Result};
@@ -135,7 +135,7 @@ pub async fn collect_messages(
     let (claude_root, codex_root) = match ws.kind {
         WorkspaceKind::Local => local_roots(ws),
         WorkspaceKind::Ssh => {
-            // 先 rsync 到本地缓存，再走与本机相同的解析逻辑。
+            // 先 ssh+tar 流式拉到本地缓存，再走与本机相同的解析逻辑。
             let cache = crate::ssh::sync_to_cache(ws).await?;
             (
                 cache.get("claude-code").cloned(),
