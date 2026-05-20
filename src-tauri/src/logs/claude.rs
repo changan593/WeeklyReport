@@ -8,28 +8,34 @@ use serde_json::Value;
 use std::path::Path;
 
 use super::compress::{clip_text, path_basename, value_to_short_str};
-use super::{parse_ts, Message, Role, Tool};
+use super::{parse_ts, Message, ParseStats, Role, Tool};
 
-/// 扫描 Claude Code 根目录，输出 since 之后的所有 Messages。
+/// 扫描 Claude Code 根目录，输出 since 之后的所有 Messages + 跳过统计。
 ///
-/// 失败的单个文件 `warn!` 后跳过，不阻塞整体收集。
+/// 失败的单个文件 / 单行 `warn!` 后跳过且计数，不阻塞整体收集。
 pub fn collect(
     root: &Path,
     server: &str,
     since: DateTime<Local>,
     clip_chars: usize,
-) -> Vec<Message> {
+) -> (Vec<Message>, ParseStats) {
     let mut out = Vec::new();
+    let mut stats = ParseStats::default();
 
     // 1. ~/.claude/history.jsonl
     let history = root.join("history.jsonl");
     if history.is_file() {
         match std::fs::metadata(&history) {
             Ok(meta) if super::mtime_after(&meta, since) => {
-                out.extend(parse_history_file(&history, server, since));
+                let (msgs, s) = parse_history_file(&history, server, since);
+                out.extend(msgs);
+                stats.merge(&s);
             }
             Ok(_) => {} // 文件太旧
-            Err(e) => tracing::warn!("history.jsonl 元数据读取失败: {e}"),
+            Err(e) => {
+                tracing::warn!("history.jsonl 元数据读取失败: {e}");
+                stats.skipped_files += 1;
+            }
         }
     }
 
@@ -47,33 +53,53 @@ pub fn collect(
             }
             match std::fs::metadata(path) {
                 Ok(meta) if super::mtime_after(&meta, since) => {
-                    out.extend(parse_session_file(path, server, since, clip_chars));
+                    let (msgs, s) = parse_session_file(path, server, since, clip_chars);
+                    out.extend(msgs);
+                    stats.merge(&s);
                 }
                 _ => {}
             }
         }
     }
 
-    out
+    (out, stats)
 }
 
 // ============================================================
 // history.jsonl
 // ============================================================
 
-fn parse_history_file(path: &Path, server: &str, since: DateTime<Local>) -> Vec<Message> {
+fn parse_history_file(
+    path: &Path,
+    server: &str,
+    since: DateTime<Local>,
+) -> (Vec<Message>, ParseStats) {
+    let mut stats = ParseStats::default();
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!("读取 {} 失败: {}", path.display(), e);
-            return Vec::new();
+            stats.skipped_files += 1;
+            return (Vec::new(), stats);
         }
     };
-    content
-        .lines()
-        .filter_map(|line| parse_history_line(line, server))
-        .filter(|m| m.ts.map_or(true, |ts| ts >= since))
-        .collect()
+    let mut msgs = Vec::new();
+    for line in content.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        match parse_history_line(line, server) {
+            Some(m) if m.ts.map_or(true, |ts| ts >= since) => msgs.push(m),
+            Some(_) => {} // 在窗口外，正常丢弃
+            None => {
+                // 区分"行不合法 JSON"（应计数）vs"display 字段不存在"（设计内丢弃）
+                if serde_json::from_str::<Value>(line.trim()).is_err() {
+                    stats.skipped_lines += 1;
+                }
+            }
+        }
+    }
+    (msgs, stats)
 }
 
 /// 解析 `~/.claude/history.jsonl` 一行。
@@ -111,12 +137,14 @@ fn parse_session_file(
     server: &str,
     since: DateTime<Local>,
     clip_chars: usize,
-) -> Vec<Message> {
+) -> (Vec<Message>, ParseStats) {
+    let mut stats = ParseStats::default();
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!("读取 {} 失败: {}", path.display(), e);
-            return Vec::new();
+            stats.skipped_files += 1;
+            return (Vec::new(), stats);
         }
     };
 
@@ -134,13 +162,22 @@ fn parse_session_file(
     // 第二遍：按行解析。
     let mut messages = Vec::new();
     for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        // 先 JSON 校验：失败计入 skipped_lines；后续业务判断（如 type 未知）不计数
+        if serde_json::from_str::<Value>(trimmed).is_err() {
+            stats.skipped_lines += 1;
+            continue;
+        }
         for m in parse_session_line(line, server, &project, clip_chars) {
             if m.ts.map_or(true, |ts| ts >= since) {
                 messages.push(m);
             }
         }
     }
-    messages
+    (messages, stats)
 }
 
 /// 解析 Claude Code 项目 session JSONL 的一行。

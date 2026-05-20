@@ -13,19 +13,20 @@ use serde_json::Value;
 use std::path::Path;
 
 use super::compress::{clip_text, path_basename};
-use super::{parse_ts, Message, Role, Tool};
+use super::{parse_ts, Message, ParseStats, Role, Tool};
 
-/// 扫描 Codex CLI 根目录。
+/// 扫描 Codex CLI 根目录，返回 Messages + 跳过统计。
 pub fn collect(
     root: &Path,
     server: &str,
     since: DateTime<Local>,
     clip_chars: usize,
-) -> Vec<Message> {
+) -> (Vec<Message>, ParseStats) {
     let mut out = Vec::new();
+    let mut stats = ParseStats::default();
     let sessions = root.join("sessions");
     if !sessions.is_dir() {
-        return out;
+        return (out, stats);
     }
     for entry in walkdir::WalkDir::new(&sessions)
         .into_iter()
@@ -41,12 +42,14 @@ pub fn collect(
         }
         match std::fs::metadata(path) {
             Ok(meta) if super::mtime_after(&meta, since) => {
-                out.extend(parse_rollout_file(path, server, since, clip_chars));
+                let (msgs, s) = parse_rollout_file(path, server, since, clip_chars);
+                out.extend(msgs);
+                stats.merge(&s);
             }
             _ => {}
         }
     }
-    out
+    (out, stats)
 }
 
 fn parse_rollout_file(
@@ -54,12 +57,14 @@ fn parse_rollout_file(
     server: &str,
     since: DateTime<Local>,
     clip_chars: usize,
-) -> Vec<Message> {
+) -> (Vec<Message>, ParseStats) {
+    let mut stats = ParseStats::default();
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!("读取 {} 失败: {}", path.display(), e);
-            return Vec::new();
+            stats.skipped_files += 1;
+            return (Vec::new(), stats);
         }
     };
 
@@ -89,13 +94,21 @@ fn parse_rollout_file(
     // 第二遍：按行解析。
     let mut messages = Vec::new();
     for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if serde_json::from_str::<Value>(trimmed).is_err() {
+            stats.skipped_lines += 1;
+            continue;
+        }
         for m in parse_rollout_line(line, server, &project, clip_chars) {
             if m.ts.map_or(true, |ts| ts >= since) {
                 messages.push(m);
             }
         }
     }
-    messages
+    (messages, stats)
 }
 
 /// 解析 Codex rollout JSONL 一行。
