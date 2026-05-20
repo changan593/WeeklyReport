@@ -1,7 +1,10 @@
-//! SSH 客户端：测试连接 + rsync 同步 *.jsonl 到本地缓存。
+//! SSH 客户端：测试连接 + `ssh + tar` 流式同步 *.jsonl 到本地缓存。
 //!
-//! 不引入 `ssh2` crate，改用系统 `ssh` 和 `rsync` 命令子进程（见
+//! 不引入 `ssh2` crate，改用系统 `ssh` 和 `tar` 命令子进程（见
 //! `docs/DECISIONS.md#adr-010ssh-使用系统命令而非-ssh2-crate`）。
+//!
+//! 同步走 `ssh ... 'tar c ...' | tar x` 单向流，而不是 rsync 双向协议
+//! （见 `docs/DECISIONS.md#adr-013-放弃-rsync-改用-ssh--tar-单向流`）。
 //!
 //! 公钥认证（默认）所有 SSH 调用都加：
 //! - `BatchMode=yes`（禁止任何交互式密码输入，避免卡进程）
@@ -19,6 +22,8 @@ use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
 use crate::workspace::{expand_tilde, SshAuthMethod, Workspace, WorkspaceKind};
@@ -144,19 +149,16 @@ fn format_ssh_error(stderr: &str, exit_code: Option<i32>, auth: SshAuthMethod) -
 // sync_to_cache
 // ============================================================
 
-/// 用 rsync 把远端 `*.jsonl` 同步到本地缓存目录。
+/// 用 `ssh + tar` 把远端 `*.jsonl` 同步到本地缓存目录。
 ///
 /// 返回：tool name (`"claude-code"` / `"codex"`) → 本地缓存路径。
 /// 只同步 workspace `tools` 中启用的工具；只拉 `*.jsonl` 文件（保留目录结构）。
 pub async fn sync_to_cache(ws: &Workspace) -> Result<HashMap<String, PathBuf>> {
     require_ssh(ws)?;
-    let user = ws.user.as_deref().unwrap_or("root");
-    let host = ws.host.as_deref().unwrap_or_default();
-    let password = require_password_if_needed(ws)?;
-    if password.is_some() {
+    if ws.auth_method == SshAuthMethod::Password {
+        require_password_if_needed(ws)?;
         ensure_sshpass_installed().await?;
     }
-    let ssh_e_arg = build_rsync_ssh_arg(ws);
 
     let root = cache_root(&ws.id)?;
     std::fs::create_dir_all(&root)?;
@@ -166,67 +168,144 @@ pub async fn sync_to_cache(ws: &Workspace) -> Result<HashMap<String, PathBuf>> {
         let remote = ws.claude_path.as_deref().unwrap_or("~/.claude");
         let local = root.join("claude");
         std::fs::create_dir_all(&local)?;
-        rsync_jsonl(&ssh_e_arg, user, host, remote, &local, password.as_deref()).await?;
+        tar_pull_jsonl(ws, remote, &local).await?;
         out.insert("claude-code".into(), local);
     }
     if ws.tools.iter().any(|t| t == "codex") {
         let remote = ws.codex_path.as_deref().unwrap_or("~/.codex");
         let local = root.join("codex");
         std::fs::create_dir_all(&local)?;
-        rsync_jsonl(&ssh_e_arg, user, host, remote, &local, password.as_deref()).await?;
+        tar_pull_jsonl(ws, remote, &local).await?;
         out.insert("codex".into(), local);
     }
     Ok(out)
 }
 
-async fn rsync_jsonl(
-    ssh_e_arg: &str,
-    user: &str,
-    host: &str,
-    remote: &str,
-    local: &Path,
-    password: Option<&str>,
-) -> Result<()> {
-    // 远端路径末尾加 `/` 让 rsync 按子树同步而非顶层目录。
-    let trimmed = remote.trim_end_matches('/');
-    let src = format!("{user}@{host}:{trimmed}/");
+/// 构造远端 shell 命令：进入 `remote` 目录，用 `find` 选出所有 `*.jsonl`，交给
+/// `tar` 打包到 stdout（被 ssh channel 转发到本地 stdout）。
+///
+/// 命令结构：`cd <quoted> && find . -name '*.jsonl' -print0 | tar --null -cf - -T -`
+/// - `cd` 后 `find .` 用相对路径，让 archive 中的文件路径相对 remote 根
+/// - `find -print0` + `tar --null -T -` 用 NUL 分隔，安全处理含空格/特殊字符的文件名
+/// - 远端路径走 [`sh_quote_remote_path`] 转义，抵御命令注入
+fn build_remote_tar_cmd(remote: &str) -> String {
+    format!(
+        "cd {} && find . -name '*.jsonl' -print0 | tar --null -cf - -T -",
+        sh_quote_remote_path(remote)
+    )
+}
+
+/// 选择本地 `tar` 可执行文件。
+///
+/// Windows 上 PATH 第一个 `tar.exe` 可能是 MSYS2/Cygwin 版本，它的 stdio 用
+/// Cygwin pipe 句柄，跟 Win32 OpenSSH spawn 的 anonymous pipe 不兼容（读时报
+/// "Unknown error"）。优先用 `%SystemRoot%\System32\tar.exe`（Windows 10 1803+
+/// 自带的 bsdtar），避免选到 MSYS2 tar。其他平台保持 PATH 解析的 `tar`。
+fn local_tar_command() -> Command {
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(sysroot) = std::env::var("SystemRoot") {
+            let p = PathBuf::from(&sysroot).join("System32").join("tar.exe");
+            if p.exists() {
+                return Command::new(p);
+            }
+        }
+    }
+    Command::new("tar")
+}
+
+/// 远端 `ssh + tar c` 打包 → 本地 `tar x` 解包，单向流式同步。
+///
+/// 相较 rsync：
+/// - 只用单向 stdio（ssh.stdout → tar.stdin），不依赖 rsync 协议的双向握手，
+///   避开 Windows 上 MSYS2 rsync ↔ Win32 OpenSSH 的 pipe 不兼容（详见
+///   `docs/DECISIONS.md#adr-013`）
+/// - 全量同步而非增量；对 jsonl 日志（典型 <10MB/工作区）代价可忽略
+async fn tar_pull_jsonl(ws: &Workspace, remote: &str, local: &Path) -> Result<()> {
+    let user = ws.user.as_deref().unwrap_or("root");
+    let host = ws.host.as_deref().unwrap_or_default();
     let local_str = local
         .to_str()
         .ok_or_else(|| anyhow!("缓存路径不是 UTF-8: {}", local.display()))?;
 
-    let mut cmd = Command::new("rsync");
-    cmd.args([
-        "-az",
-        "--include=*/",
-        "--include=*.jsonl",
-        "--exclude=*",
-        "-e",
-        ssh_e_arg,
-        &src,
-        local_str,
-    ]);
-    if let Some(pw) = password {
-        cmd.env(SSHPASS_ENV, pw);
-    }
-    let output = cmd.output().await.map_err(|e| {
-        anyhow!("无法启动 rsync 命令：{e}\n请确认系统已安装 rsync（Windows 用户需单独安装）")
+    // 1. 启动 ssh：远端跑 tar c，stdout 接 Rust 创建的 pipe
+    let mut ssh_cmd = build_ssh_command(ws)?;
+    ssh_cmd.arg(format!("{user}@{host}"));
+    ssh_cmd.arg(build_remote_tar_cmd(remote));
+    ssh_cmd.stdin(Stdio::null());
+    ssh_cmd.stdout(Stdio::piped());
+    ssh_cmd.stderr(Stdio::piped());
+
+    let mut ssh = ssh_cmd
+        .spawn()
+        .map_err(|e| anyhow!("无法启动 ssh 命令：{e}\n请确认系统已安装 OpenSSH"))?;
+
+    // 2. 启动本地 tar x，stdin 从 ssh stdout 接管
+    let mut tar_cmd = local_tar_command();
+    tar_cmd
+        .args(["xf", "-", "-C", local_str])
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut tar = tar_cmd.spawn().map_err(|e| {
+        anyhow!(
+            "无法启动 tar 命令：{e}\n请确认系统已安装 tar\n\
+             （Windows 10+ / macOS / Linux 默认都自带）"
+        )
     })?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let snippet = stderr
+    let mut ssh_stdout = ssh.stdout.take().expect("ssh stdout piped");
+    let mut ssh_stderr = ssh.stderr.take().expect("ssh stderr piped");
+    let mut tar_stdin = tar.stdin.take().expect("tar stdin piped");
+    let mut tar_stderr = tar.stderr.take().expect("tar stderr piped");
+
+    // 3. 并发：两端 stderr 后台收集 + ssh stdout 搬到 tar stdin
+    let ssh_err_task = tokio::spawn(async move {
+        let mut buf = Vec::new();
+        let _ = ssh_stderr.read_to_end(&mut buf).await;
+        buf
+    });
+    let tar_err_task = tokio::spawn(async move {
+        let mut buf = Vec::new();
+        let _ = tar_stderr.read_to_end(&mut buf).await;
+        buf
+    });
+    let copy_task = tokio::spawn(async move {
+        let res = tokio::io::copy(&mut ssh_stdout, &mut tar_stdin).await;
+        // 显式 drop 让 tar 看到 stdin EOF
+        drop(tar_stdin);
+        res
+    });
+
+    // 4. 等结束 + 统一错误处理
+    let ssh_status = ssh.wait().await?;
+    let _ = copy_task.await;
+    let tar_status = tar.wait().await?;
+    let ssh_err = ssh_err_task.await.unwrap_or_default();
+    let tar_err = tar_err_task.await.unwrap_or_default();
+
+    if !ssh_status.success() {
+        let stderr_str = String::from_utf8_lossy(&ssh_err);
+        return Err(format_ssh_error(
+            &stderr_str,
+            ssh_status.code(),
+            ws.auth_method,
+        ));
+    }
+    if !tar_status.success() {
+        let stderr_str = String::from_utf8_lossy(&tar_err);
+        let snippet = stderr_str
             .lines()
             .filter(|l| !l.trim().is_empty())
             .take(3)
             .collect::<Vec<_>>()
             .join("\n");
         return Err(anyhow!(
-            "rsync 失败（exit={}）：\n{snippet}",
-            output
-                .status
+            "本地 tar 解包失败（exit={}）：\n{snippet}",
+            tar_status
                 .code()
                 .map(|c| c.to_string())
-                .unwrap_or_default()
+                .unwrap_or_else(|| "?".into())
         ));
     }
     Ok(())
@@ -339,40 +418,6 @@ fn base_ssh_args(ws: &Workspace) -> Vec<String> {
         }
     }
     args
-}
-
-/// 拼成 `rsync -e "ssh -o ... -p ... -i ..."` 所需的单参数字符串。
-///
-/// 密码方式时返回 `sshpass -e ssh ...`，rsync 进程必须同时设置
-/// `SSHPASS` 环境变量（在 `rsync_jsonl` 中处理）。
-fn build_rsync_ssh_arg(ws: &Workspace) -> String {
-    let prefix = match ws.auth_method {
-        SshAuthMethod::Key => String::from("ssh"),
-        SshAuthMethod::Password => String::from("sshpass -e ssh"),
-    };
-    let mut s =
-        format!("{prefix} -o StrictHostKeyChecking=no -o ConnectTimeout={CONNECT_TIMEOUT_SECS}");
-    match ws.auth_method {
-        SshAuthMethod::Key => {
-            s.push_str(" -o BatchMode=yes");
-            if let Some(k) = ws.ssh_key.as_deref() {
-                if !k.is_empty() {
-                    // 简单引用：路径中有空格时会出问题，但用户的私钥路径几乎不会有空格
-                    s.push_str(&format!(" -i {}", expand_tilde(k)));
-                }
-            }
-        }
-        SshAuthMethod::Password => {
-            s.push_str(" -o PreferredAuthentications=password,keyboard-interactive");
-            s.push_str(" -o PubkeyAuthentication=no");
-        }
-    }
-    if let Some(p) = ws.port {
-        if p != 22 {
-            s.push_str(&format!(" -p {p}"));
-        }
-    }
-    s
 }
 
 /// 跨平台缓存根目录：
@@ -488,25 +533,33 @@ mod tests {
         assert!(!args.iter().any(|a| a == "-i"));
     }
 
+    // -------- 远端 tar 命令构造 --------
+
     #[test]
-    fn rsync_ssh_arg_format() {
-        let s = build_rsync_ssh_arg(&ssh_ws());
-        assert!(s.starts_with("ssh "));
-        assert!(s.contains("BatchMode=yes"));
-        assert!(s.contains("-p 2200"));
-        assert!(s.contains("-i "));
+    fn remote_tar_cmd_uses_relative_path_after_cd() {
+        let s = build_remote_tar_cmd("/home/alice/.claude");
+        // cd 之后 find 必须用 `.` 相对路径，让 archive 路径相对 remote 根
+        assert!(s.contains("cd '/home/alice/.claude'"));
+        assert!(s.contains("find . -name '*.jsonl' -print0"));
+        assert!(s.contains("tar --null -cf - -T -"));
     }
 
     #[test]
-    fn rsync_ssh_arg_password_uses_sshpass() {
-        let s = build_rsync_ssh_arg(&ssh_pw_ws());
-        assert!(s.starts_with("sshpass -e ssh "));
-        assert!(!s.contains("BatchMode=yes"));
-        assert!(s.contains("PreferredAuthentications=password"));
-        assert!(s.contains("PubkeyAuthentication=no"));
-        assert!(s.contains("-p 2200"));
-        // 密码本身绝不能出现在 rsync -e 参数里
-        assert!(!s.contains("s3cret"));
+    fn remote_tar_cmd_expands_tilde_via_home() {
+        // ~/.claude 必须被 sh_quote_remote_path 转为 "$HOME"'/.claude'
+        let s = build_remote_tar_cmd("~/.claude");
+        assert!(s.contains("cd \"$HOME\"'/.claude'"));
+    }
+
+    #[test]
+    fn remote_tar_cmd_neutralizes_injection() {
+        // 攻击者填的 remote_path：闭合引号 + 注入 rm
+        let s = build_remote_tar_cmd("~/foo'; rm -rf ~ #");
+        // 注入字符必须全部留在单引号内，find / tar 段照样在
+        assert!(s.contains("find . -name '*.jsonl' -print0"));
+        assert!(s.contains("rm -rf"));
+        // cd 段必须以 "$HOME" 开头（家目录展开），整个尾段在单引号里
+        assert!(s.contains("cd \"$HOME\""));
     }
 
     #[test]

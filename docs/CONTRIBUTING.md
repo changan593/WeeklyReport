@@ -10,7 +10,7 @@
 | ------------------- | ------------------ | ------------------------------------------------- |
 | Node.js             | ≥ 18               | 前端构建                                          |
 | Rust                | ≥ 1.75（edition 2021） | 后端                                          |
-| `ssh` / `rsync`     | 系统命令           | SSH 远程工作区使用；Windows 用户需单独装 rsync    |
+| `ssh` / `tar`       | 系统命令           | SSH 远程工作区使用；Windows 10 1803+ / macOS / Linux 默认都自带 |
 | Linux 系统库        | 见 README          | Tauri 在 Linux 上依赖 webkit2gtk / gtk3           |
 
 ---
