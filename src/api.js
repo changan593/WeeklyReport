@@ -51,6 +51,56 @@ export function llmPresets() {
 }
 
 // ============================================================
+// Templates
+// ============================================================
+
+export function listTemplates() {
+  return invoke('list_templates');
+}
+
+export function saveTemplate(template) {
+  return invoke('save_template', { template });
+}
+
+export function deleteTemplate(id) {
+  return invoke('delete_template', { id });
+}
+
+// ============================================================
+// Reports & Generation
+// ============================================================
+
+export function listReports() {
+  return invoke('list_reports');
+}
+
+export function getReport(id) {
+  return invoke('get_report', { id });
+}
+
+export function deleteReport(id) {
+  return invoke('delete_report', { id });
+}
+
+/// req: { workspace_ids, template_id, days, provider_id? }
+/// 返回: { record, content, duration_ms }
+export function generateReport(req) {
+  return invoke('generate_report', { req });
+}
+
+// ============================================================
+// Settings
+// ============================================================
+
+export function getSettings() {
+  return invoke('get_settings');
+}
+
+export function saveSettings(settings) {
+  return invoke('save_settings', { settings });
+}
+
+// ============================================================
 // Misc
 // ============================================================
 

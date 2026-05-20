@@ -1,12 +1,14 @@
-// App shell：侧边栏 + 路由切换。
+// App shell：侧边栏 + 路由切换 + 生成对话框入口。
 //
-// 阶段 4 接入 Workspaces / Providers 两页；其余页面占位，留待后续阶段填充。
 // 详见 docs/UI.md#2-布局结构。
 
 import { useState } from 'react';
+import GenerateDialog from './components/GenerateDialog.jsx';
+import Providers from './components/Providers.jsx';
+import Reports from './components/Reports.jsx';
+import Templates from './components/Templates.jsx';
 import { Icon } from './components/ui.jsx';
 import Workspaces from './components/Workspaces.jsx';
-import Providers from './components/Providers.jsx';
 
 const NAV = [
   { key: 'workspaces', label: '工作区', icon: 'workspace' },
@@ -19,6 +21,9 @@ const NAV = [
 
 export default function App() {
   const [page, setPage] = useState('workspaces');
+  const [genOpen, setGenOpen] = useState(false);
+  // 用一个 nonce 触发 Reports 页面重载（生成完报告后）
+  const [reportsNonce, setReportsNonce] = useState(0);
 
   return (
     <div className="flex h-screen w-full bg-stone-50 text-stone-900">
@@ -49,9 +54,8 @@ export default function App() {
         <div className="border-t border-stone-200 p-3">
           <button
             type="button"
-            disabled
-            title="生成对话框由阶段 5 实现"
-            className="flex w-full items-center justify-center gap-1.5 rounded-md bg-stone-200 px-3 py-2 text-[12.5px] text-stone-400"
+            onClick={() => setGenOpen(true)}
+            className="flex w-full items-center justify-center gap-1.5 rounded-md bg-stone-900 px-3 py-2 text-[12.5px] text-white hover:bg-stone-800"
           >
             <Icon name="sparkle" size={15} />
             <span>生成周报</span>
@@ -62,16 +66,25 @@ export default function App() {
       {/* 主内容 */}
       <main className="flex-1 overflow-auto">
         <div className="mx-auto max-w-4xl px-10 py-10">
-          <Page page={page} />
+          <Page page={page} reportsNonce={reportsNonce} />
         </div>
       </main>
+
+      {genOpen && (
+        <GenerateDialog
+          onClose={() => setGenOpen(false)}
+          onGenerated={() => setReportsNonce((n) => n + 1)}
+        />
+      )}
     </div>
   );
 }
 
-function Page({ page }) {
+function Page({ page, reportsNonce }) {
   if (page === 'workspaces') return <Workspaces />;
   if (page === 'providers') return <Providers />;
+  if (page === 'templates') return <Templates />;
+  if (page === 'reports') return <Reports key={reportsNonce} />;
   return (
     <Placeholder
       title={NAV.find((n) => n.key === page)?.label || ''}

@@ -12,7 +12,11 @@ mod state;
 mod store;
 mod workspace;
 
+use chrono::Local;
 use llm::LlmProvider;
+use report::{ReportRecord, Template};
+use serde::{Deserialize, Serialize};
+use state::Settings;
 use workspace::Workspace;
 
 /// 应用入口。
@@ -49,6 +53,18 @@ fn main() {
             delete_provider,
             test_provider,
             llm_presets,
+            // Templates
+            list_templates,
+            save_template,
+            delete_template,
+            // Reports
+            list_reports,
+            get_report,
+            delete_report,
+            generate_report,
+            // Settings
+            get_settings,
+            save_settings,
             // Misc
             data_dir_path,
         ])
@@ -139,4 +155,197 @@ async fn test_provider(provider: LlmProvider) -> Result<String, String> {
 #[tauri::command]
 fn llm_presets() -> Vec<LlmProvider> {
     llm::presets().into_iter().map(|(_, p)| p).collect()
+}
+
+// ============================================================
+// Templates
+// ============================================================
+
+#[tauri::command]
+async fn list_templates() -> Result<Vec<Template>, String> {
+    state::list_templates().map_err(err_to_string)
+}
+
+#[tauri::command]
+async fn save_template(template: Template) -> Result<Template, String> {
+    state::save_template(template).map_err(err_to_string)
+}
+
+#[tauri::command]
+async fn delete_template(id: String) -> Result<(), String> {
+    state::delete_template(&id).map_err(err_to_string)
+}
+
+// ============================================================
+// Reports & Generation
+// ============================================================
+
+#[derive(Debug, Serialize)]
+struct ReportPayload {
+    record: ReportRecord,
+    content: String,
+}
+
+#[tauri::command]
+async fn list_reports() -> Result<Vec<ReportRecord>, String> {
+    state::list_reports().map_err(err_to_string)
+}
+
+#[tauri::command]
+async fn get_report(id: String) -> Result<ReportPayload, String> {
+    let (record, content) = state::get_report(&id).map_err(err_to_string)?;
+    Ok(ReportPayload { record, content })
+}
+
+#[tauri::command]
+async fn delete_report(id: String) -> Result<(), String> {
+    state::delete_report(&id).map_err(err_to_string)
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct GenerateRequest {
+    workspace_ids: Vec<String>,
+    template_id: String,
+    days: u32,
+    #[serde(default)]
+    provider_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct GenerateResponse {
+    record: ReportRecord,
+    content: String,
+    duration_ms: u64,
+}
+
+#[tauri::command]
+async fn generate_report(req: GenerateRequest) -> Result<GenerateResponse, String> {
+    generate_impl(req).await.map_err(err_to_string)
+}
+
+async fn generate_impl(req: GenerateRequest) -> anyhow::Result<GenerateResponse> {
+    use anyhow::{anyhow, bail};
+
+    // 1. 模板
+    let template = state::list_templates()?
+        .into_iter()
+        .find(|t| t.id == req.template_id)
+        .ok_or_else(|| anyhow!("模板不存在: {}", req.template_id))?;
+
+    // 2. 解析 provider（按 LLM.md §6 优先级）
+    let provider = resolve_provider(
+        req.provider_id.as_deref(),
+        template.provider_id.as_deref(),
+    )?;
+
+    // 3. 工作区
+    let all_ws = state::list_workspaces()?;
+    let workspaces: Vec<Workspace> = all_ws
+        .into_iter()
+        .filter(|w| req.workspace_ids.iter().any(|id| id == &w.id))
+        .collect();
+    if workspaces.is_empty() {
+        bail!("未选中任何工作区");
+    }
+
+    // 4. 设置
+    let settings = state::get_settings()?;
+    let clip = settings.prompt_clip_chars as usize;
+
+    // 5. 收集 messages（多 workspace 串行，错误不阻塞）
+    let mut messages = Vec::new();
+    for ws in &workspaces {
+        match logs::collect_messages(ws, req.days, clip).await {
+            Ok(part) => messages.extend(part),
+            Err(e) => tracing::warn!("workspace {} 收集日志失败: {:#}", ws.name, e),
+        }
+    }
+
+    // 6. 聚合
+    let summary = logs::aggregate(messages);
+
+    // 7. 历史报告作为风格参考
+    let past = load_past_reports(settings.past_reports_context as usize)?;
+
+    // 8. 生成
+    let (markdown, tokens, duration_ms) =
+        report::generate(&summary, &template, &past, &provider).await?;
+
+    // 9. 存档
+    let record = ReportRecord {
+        id: String::new(),
+        week: format!("最近 {} 天", req.days),
+        template_id: template.id.clone(),
+        template_name: template.name.clone(),
+        provider_id: Some(provider.id.clone()),
+        provider_name: Some(provider.name.clone()),
+        tokens_used: tokens,
+        project_count: summary.stats.project_count,
+        generated_at: Local::now().to_rfc3339(),
+    };
+    let saved = state::save_report(record, &markdown)?;
+
+    Ok(GenerateResponse {
+        record: saved,
+        content: markdown,
+        duration_ms,
+    })
+}
+
+/// 按 docs/LLM.md §6 的优先级解析 provider：
+/// 显式 > 模板 > 默认 > 第一个 > 报错。
+fn resolve_provider(
+    explicit: Option<&str>,
+    template_pid: Option<&str>,
+) -> anyhow::Result<LlmProvider> {
+    let providers = state::list_providers()?;
+
+    if let Some(id) = explicit {
+        if !id.is_empty() {
+            if let Some(p) = providers.iter().find(|p| p.id == id) {
+                return Ok(p.clone());
+            }
+            return Err(anyhow::anyhow!("指定的 LLM 源不存在: {id}"));
+        }
+    }
+    if let Some(id) = template_pid {
+        if !id.is_empty() {
+            if let Some(p) = providers.iter().find(|p| p.id == id) {
+                return Ok(p.clone());
+            }
+            // 模板指定的 provider 已被删除 → 回退到默认（不报错）
+        }
+    }
+    state::get_default_provider()
+}
+
+/// 取最近 `n` 份历史报告的 Markdown 正文。失败的单条 warn! 后跳过。
+fn load_past_reports(n: usize) -> anyhow::Result<Vec<String>> {
+    if n == 0 {
+        return Ok(Vec::new());
+    }
+    let mut records = state::list_reports()?;
+    records.sort_by(|a, b| b.generated_at.cmp(&a.generated_at));
+    let mut out = Vec::new();
+    for r in records.into_iter().take(n) {
+        match store::load_report_file(&r.id) {
+            Ok(s) => out.push(s),
+            Err(e) => tracing::warn!("加载历史报告 {} 失败: {:#}", r.id, e),
+        }
+    }
+    Ok(out)
+}
+
+// ============================================================
+// Settings
+// ============================================================
+
+#[tauri::command]
+fn get_settings() -> Result<Settings, String> {
+    state::get_settings().map_err(err_to_string)
+}
+
+#[tauri::command]
+fn save_settings(settings: Settings) -> Result<(), String> {
+    state::save_settings(&settings).map_err(err_to_string)
 }
