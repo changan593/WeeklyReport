@@ -36,16 +36,20 @@ pub async fn test(ws: &Workspace) -> Result<String> {
     let claude_path = ws.claude_path.as_deref().unwrap_or("~/.claude");
     let codex_path = ws.codex_path.as_deref().unwrap_or("~/.codex");
 
-    // 在远端执行的 shell 脚本：echo OK + 各 path 的存在性检查
+    // 远端 shell 脚本：echo OK + 各 path 的存在性检查。
+    // 路径必须 POSIX shell 安全转义，否则用户填的 `claude_path = "\"; rm -rf ~"`
+    // 会在远端执行任意命令。
     let mut script = String::from("echo OK");
     if want_claude {
         script.push_str(&format!(
-            " && (test -d \"{claude_path}\" && echo CLAUDE_OK || echo CLAUDE_MISSING)"
+            " && (test -d {} && echo CLAUDE_OK || echo CLAUDE_MISSING)",
+            sh_quote(claude_path)
         ));
     }
     if want_codex {
         script.push_str(&format!(
-            " && (test -d \"{codex_path}\" && echo CODEX_OK || echo CODEX_MISSING)"
+            " && (test -d {} && echo CODEX_OK || echo CODEX_MISSING)",
+            sh_quote(codex_path)
         ));
     }
 
@@ -276,6 +280,15 @@ fn cache_app_name() -> &'static str {
     }
 }
 
+/// 把任意字符串安全包成 POSIX shell 单引号字符串。
+///
+/// 单引号内只有单引号本身是特殊字符，把它转义为 `'\''` 即可。
+/// 这是抵御命令注入的标准做法，比双引号转义更可靠（双引号内 `$`、`\` 等都是
+/// 特殊字符，需要分别处理，容易遗漏）。
+fn sh_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
 // ============================================================
 // 测试
 // ============================================================
@@ -382,6 +395,40 @@ mod tests {
         assert_ne!(a, b);
         assert!(a.ends_with("ws-a"));
         assert!(b.ends_with("ws-b"));
+    }
+
+    // -------- 命令注入抵御 --------
+
+    #[test]
+    fn sh_quote_wraps_in_single_quotes() {
+        assert_eq!(sh_quote("plain"), "'plain'");
+        assert_eq!(sh_quote("/Users/me/.claude"), "'/Users/me/.claude'");
+    }
+
+    #[test]
+    fn sh_quote_escapes_single_quote() {
+        assert_eq!(sh_quote("it's"), "'it'\\''s'");
+    }
+
+    #[test]
+    fn sh_quote_neutralizes_injection_attempts() {
+        // 经典攻击 payload：闭合引号 + 注入命令
+        let evil = r#""; rm -rf ~; echo ""#;
+        let quoted = sh_quote(evil);
+        // 整个 evil 字符串全部在外层单引号内，shell 不会展开
+        assert!(quoted.starts_with('\''));
+        assert!(quoted.ends_with('\''));
+        // 内部双引号原样保留（在单引号内是普通字符）
+        assert!(quoted.contains('"'));
+        // 关键：分号和 rm 都被关在单引号内，不会被 shell 解释
+        assert!(quoted.contains("rm -rf"));
+    }
+
+    #[test]
+    fn sh_quote_handles_dollar_and_backtick() {
+        // $ 和 ` 在双引号内会被展开，但在单引号内是普通字符
+        assert_eq!(sh_quote("$PATH"), "'$PATH'");
+        assert_eq!(sh_quote("`whoami`"), "'`whoami`'");
     }
 
     #[tokio::test]

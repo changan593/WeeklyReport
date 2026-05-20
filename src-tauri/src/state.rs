@@ -281,7 +281,7 @@ pub fn save_provider(mut p: LlmProvider) -> Result<LlmProvider> {
         }
     }
 
-    store::write_json(F_PROVIDERS, &list)?;
+    store::write_json_secret(F_PROVIDERS, &list)?;
     Ok(p)
 }
 
@@ -299,7 +299,7 @@ pub fn delete_provider(id: &str) -> Result<()> {
             first.is_default = true;
         }
     }
-    store::write_json(F_PROVIDERS, &list)
+    store::write_json_secret(F_PROVIDERS, &list)
 }
 
 /// 按优先级返回当前应使用的 provider（参考 `docs/LLM.md#6-优先级解析`）。
@@ -378,7 +378,7 @@ pub fn get_smtp_config() -> Result<SmtpConfig> {
 }
 
 pub fn save_smtp_config(cfg: &SmtpConfig) -> Result<()> {
-    store::write_json(F_SMTP, cfg)
+    store::write_json_secret(F_SMTP, cfg)
 }
 
 // ============================================================

@@ -33,7 +33,10 @@ pub enum LlmKind {
 }
 
 /// 用户配置的一个 LLM 源。字段语义见 `docs/LLM.md#2-数据模型`。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+///
+/// `Debug` 自定义实现：`api_key` 永远以 `***` 输出，避免 `tracing::warn!("{:?}", p)`
+/// 这类日志意外把密钥喷到 stderr / 文件日志 / 崩溃报告里。
+#[derive(Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct LlmProvider {
     pub id: String,
     pub name: String,
@@ -49,6 +52,40 @@ pub struct LlmProvider {
     pub is_default: bool,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub extra_headers: HashMap<String, String>,
+}
+
+impl std::fmt::Debug for LlmProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LlmProvider")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            .field("kind", &self.kind)
+            .field("base_url", &self.base_url)
+            .field("api_key", &mask_secret(&self.api_key))
+            .field("model", &self.model)
+            .field("max_tokens", &self.max_tokens)
+            .field("temperature", &self.temperature)
+            .field("is_default", &self.is_default)
+            .field("extra_headers", &self.extra_headers)
+            .finish()
+    }
+}
+
+/// 把密钥脱敏为 `<empty>` 或 `sk-xx***5 chars`。
+/// 短密钥（<8）只露前 1 后 1；长的露前 4 后 2。
+pub(crate) fn mask_secret(s: &str) -> String {
+    let n = s.chars().count();
+    if n == 0 {
+        return "<empty>".into();
+    }
+    if n <= 8 {
+        let first: String = s.chars().take(1).collect();
+        let last: String = s.chars().rev().take(1).collect();
+        return format!("{first}***{last}");
+    }
+    let first: String = s.chars().take(4).collect();
+    let last: String = s.chars().skip(n.saturating_sub(2)).collect();
+    format!("{first}***{last}")
 }
 
 /// LLM 调用返回。
@@ -465,6 +502,51 @@ mod tests {
             parse_response(LlmKind::Gemini, &gemini_body).unwrap(),
             ("g".into(), 7)
         );
+    }
+
+    #[test]
+    fn debug_masks_api_key() {
+        let p = LlmProvider {
+            id: "p1".into(),
+            name: "x".into(),
+            kind: LlmKind::OpenAiCompatible,
+            base_url: "https://api.openai.com".into(),
+            api_key: "sk-secret-abcd1234".into(),
+            model: "gpt-4o-mini".into(),
+            max_tokens: 100,
+            temperature: None,
+            is_default: false,
+            extra_headers: HashMap::new(),
+        };
+        let s = format!("{p:?}");
+        assert!(s.contains("***"), "Debug 应含 ***，实际：{s}");
+        assert!(!s.contains("secret-abcd"), "Debug 不应含完整密钥：{s}");
+        // 但其他字段应可见
+        assert!(s.contains("gpt-4o-mini"));
+    }
+
+    #[test]
+    fn mask_secret_empty() {
+        assert_eq!(mask_secret(""), "<empty>");
+    }
+
+    #[test]
+    fn mask_secret_short() {
+        assert_eq!(mask_secret("abc"), "a***c");
+        assert_eq!(mask_secret("abcdefgh"), "a***h");
+    }
+
+    #[test]
+    fn mask_secret_long() {
+        // 长度 > 8：前 4 后 2
+        assert_eq!(mask_secret("sk-1234567890"), "sk-1***90");
+    }
+
+    #[test]
+    fn mask_secret_unicode() {
+        // 中文 4 个字符
+        let r = mask_secret("密钥很长很长很长");
+        assert!(r.contains("***"));
     }
 
     #[test]

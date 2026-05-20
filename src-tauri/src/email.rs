@@ -21,7 +21,9 @@ use serde::{Deserialize, Serialize};
 /// SMTP 配置（单例，保存到 `smtp.json`）。
 ///
 /// `use_ssl = true` → 隐式 TLS（典型端口 465）；`false` → STARTTLS（典型 587）。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+///
+/// `Debug` 自定义：`password` 永远以 `***` 输出，避免日志意外泄露。
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct SmtpConfig {
     #[serde(default)]
     pub host: String,
@@ -35,6 +37,19 @@ pub struct SmtpConfig {
     pub from_name: String,
     #[serde(default)]
     pub use_ssl: bool,
+}
+
+impl std::fmt::Debug for SmtpConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SmtpConfig")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("username", &self.username)
+            .field("password", &crate::llm::mask_secret(&self.password))
+            .field("from_name", &self.from_name)
+            .field("use_ssl", &self.use_ssl)
+            .finish()
+    }
 }
 
 /// 一封待发送邮件。

@@ -83,6 +83,46 @@ pub fn write_json<T: Serialize>(filename: &str, value: &T) -> Result<()> {
     write_json_to(&path, value)
 }
 
+/// 同 [`write_json`]，但写完后把文件权限限制为仅当前用户可读写（POSIX 0600）。
+///
+/// 用于保存敏感数据（API key / SMTP 密码）。Windows 上 NTFS 默认已经只允许当前用户访问，
+/// 此函数为 no-op。
+pub fn write_json_secret<T: Serialize>(filename: &str, value: &T) -> Result<()> {
+    let path = data_dir()?.join(filename);
+    write_json_secret_to(&path, value)
+}
+
+pub(crate) fn write_json_secret_to<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+    write_json_to(path, value)?;
+    restrict_to_user(path)?;
+    Ok(())
+}
+
+/// 把文件权限设为 `0o600`（rw-------）。仅 Unix 生效；Windows 是 no-op。
+///
+/// 失败只 `warn!`，不阻断写入（权限设置失败一般是 FS 不支持 chmod，如 FAT32 / 网络盘）。
+#[cfg(unix)]
+fn restrict_to_user(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = match fs::metadata(path) {
+        Ok(m) => m.permissions(),
+        Err(e) => {
+            tracing::warn!("无法读取 {} 权限: {e}", path.display());
+            return Ok(());
+        }
+    };
+    perms.set_mode(0o600);
+    if let Err(e) = fs::set_permissions(path, perms) {
+        tracing::warn!("无法设置 {} 权限为 0600: {e}", path.display());
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn restrict_to_user(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
 /// 与 [`read_json`] 同语义，但直接对指定路径操作（便于测试）。
 pub(crate) fn read_json_from<T: DeserializeOwned + Default>(path: &Path) -> Result<T> {
     if !path.exists() {
@@ -264,6 +304,23 @@ mod tests {
         assert!(path.exists());
         let tmp = tmp_path(&path);
         assert!(!tmp.exists(), "成功写入后不应留下 .tmp");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn write_json_secret_sets_0600_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        // 用 path-based 变体避免污染全局 DATA_ROOT（与 state.rs 测试并发跑）
+        let dir = temp_dir();
+        let path = dir.join("secret.json");
+        let v = Sample {
+            name: "secret".into(),
+            count: 1,
+            ..Default::default()
+        };
+        write_json_secret_to(&path, &v).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "敏感文件应为 0o600，实际 {mode:o}");
     }
 
     #[test]
