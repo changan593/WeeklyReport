@@ -55,7 +55,7 @@ pub struct Workspace {
 pub async fn test_connection(ws: &Workspace) -> anyhow::Result<String> {
     match ws.kind {
         WorkspaceKind::Local => Ok(test_local(ws)),
-        WorkspaceKind::Ssh => Err(anyhow::anyhow!("SSH 工作区连接测试尚未实现（阶段 6）")),
+        WorkspaceKind::Ssh => crate::ssh::test(ws).await,
     }
 }
 

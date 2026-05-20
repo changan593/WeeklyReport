@@ -8,6 +8,7 @@ mod llm;
 mod logs;
 mod report;
 mod scheduler;
+mod ssh;
 mod state;
 mod store;
 mod workspace;
@@ -233,10 +234,7 @@ async fn generate_impl(req: GenerateRequest) -> anyhow::Result<GenerateResponse>
         .ok_or_else(|| anyhow!("模板不存在: {}", req.template_id))?;
 
     // 2. 解析 provider（按 LLM.md §6 优先级）
-    let provider = resolve_provider(
-        req.provider_id.as_deref(),
-        template.provider_id.as_deref(),
-    )?;
+    let provider = resolve_provider(req.provider_id.as_deref(), template.provider_id.as_deref())?;
 
     // 3. 工作区
     let all_ws = state::list_workspaces()?;

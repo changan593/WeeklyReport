@@ -16,7 +16,7 @@ use anyhow::{anyhow, Result};
 use chrono::{DateTime, Duration, Local};
 use std::collections::{BTreeSet, HashMap};
 use std::fs::Metadata;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use crate::workspace::{expand_tilde, Workspace, WorkspaceKind};
@@ -110,42 +110,69 @@ pub async fn collect_messages(
     days: u32,
     clip_chars: usize,
 ) -> Result<Vec<Message>> {
-    let ws = ws.clone();
-    tokio::task::spawn_blocking(move || collect_blocking(&ws, days, clip_chars))
-        .await
-        .map_err(|e| anyhow!("收集任务 panic: {e}"))?
-}
-
-fn collect_blocking(ws: &Workspace, days: u32, clip_chars: usize) -> Result<Vec<Message>> {
-    match ws.kind {
-        WorkspaceKind::Local => Ok(collect_local(ws, days, clip_chars)),
+    let (claude_root, codex_root) = match ws.kind {
+        WorkspaceKind::Local => local_roots(ws),
         WorkspaceKind::Ssh => {
-            // 阶段 6 实现：先 rsync 到 cache_dir() 再走 local 逻辑
-            Err(anyhow!("SSH workspace 尚未实现（阶段 6）"))
+            // 先 rsync 到本地缓存，再走与本机相同的解析逻辑。
+            let cache = crate::ssh::sync_to_cache(ws).await?;
+            (
+                cache.get("claude-code").cloned(),
+                cache.get("codex").cloned(),
+            )
         }
-    }
+    };
+
+    let ws_name = ws.name.clone();
+    tokio::task::spawn_blocking(move || {
+        let since = Local::now() - Duration::days(days as i64);
+        Ok(collect_from_paths(
+            &ws_name,
+            claude_root.as_deref(),
+            codex_root.as_deref(),
+            since,
+            clip_chars,
+        ))
+    })
+    .await
+    .map_err(|e| anyhow!("收集任务 panic: {e}"))?
 }
 
-fn collect_local(ws: &Workspace, days: u32, clip_chars: usize) -> Vec<Message> {
-    let since = Local::now() - Duration::days(days as i64);
+/// 本机工作区根据 tools 决定哪些路径要扫；未启用的工具返回 None。
+fn local_roots(ws: &Workspace) -> (Option<PathBuf>, Option<PathBuf>) {
+    let claude = if ws.tools.iter().any(|t| t == "claude-code") {
+        let raw = ws.claude_path.as_deref().unwrap_or("~/.claude");
+        Some(PathBuf::from(expand_tilde(raw)))
+    } else {
+        None
+    };
+    let codex = if ws.tools.iter().any(|t| t == "codex") {
+        let raw = ws.codex_path.as_deref().unwrap_or("~/.codex");
+        Some(PathBuf::from(expand_tilde(raw)))
+    } else {
+        None
+    };
+    (claude, codex)
+}
+
+/// 给定 Claude / Codex 根目录（本机或 SSH 缓存），收集所有 since 之后的 Message。
+fn collect_from_paths(
+    server_name: &str,
+    claude_root: Option<&Path>,
+    codex_root: Option<&Path>,
+    since: DateTime<Local>,
+    clip_chars: usize,
+) -> Vec<Message> {
     let mut out = Vec::new();
-
-    if ws.tools.iter().any(|t| t == "claude-code") {
-        let path_str = ws.claude_path.as_deref().unwrap_or("~/.claude");
-        let path = PathBuf::from(expand_tilde(path_str));
-        if path.is_dir() {
-            out.extend(claude::collect(&path, &ws.name, since, clip_chars));
+    if let Some(p) = claude_root {
+        if p.is_dir() {
+            out.extend(claude::collect(p, server_name, since, clip_chars));
         }
     }
-
-    if ws.tools.iter().any(|t| t == "codex") {
-        let path_str = ws.codex_path.as_deref().unwrap_or("~/.codex");
-        let path = PathBuf::from(expand_tilde(path_str));
-        if path.is_dir() {
-            out.extend(codex::collect(&path, &ws.name, since, clip_chars));
+    if let Some(p) = codex_root {
+        if p.is_dir() {
+            out.extend(codex::collect(p, server_name, since, clip_chars));
         }
     }
-
     out
 }
 
@@ -530,14 +557,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn collect_messages_ssh_returns_error_before_phase6() {
+    async fn collect_messages_ssh_without_host_errors() {
+        // 阶段 6 起 SSH 分支启用：调 ssh::sync_to_cache 前先 require_ssh 校验 host
         let ws = Workspace {
             id: "w1".into(),
             name: "x".into(),
             kind: WorkspaceKind::Ssh,
             ..Default::default()
         };
-        assert!(collect_messages(&ws, 7, 200).await.is_err());
+        let err = collect_messages(&ws, 7, 200).await.unwrap_err().to_string();
+        assert!(err.contains("host"), "应提示缺 host，实际: {err}");
     }
 
     #[tokio::test]
