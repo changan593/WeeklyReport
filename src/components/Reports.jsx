@@ -22,6 +22,7 @@ import {
   PrimaryButton,
   SecondaryButton,
 } from './ui.jsx';
+import { formatIsoMinute as formatTs } from '../utils.js';
 
 export default function Reports() {
   const [items, loading, reload] = useAsyncState(listReports, []);
@@ -110,11 +111,7 @@ function ReportTable({ items, onOpen }) {
   );
 }
 
-function formatTs(iso) {
-  if (!iso) return '—';
-  // 简单展示，截到分钟即可
-  return iso.replace('T', ' ').slice(0, 16);
-}
+// formatTs 复用 src/utils.js 的 formatIsoMinute（导入在文件顶部）
 
 function ReportDetail({ id, onClose, onDeleted }) {
   const [data, loading, , error] = useAsyncState(() => getReport(id), [id]);

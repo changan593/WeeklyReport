@@ -35,13 +35,15 @@ import {
   Textarea,
   Toggle,
 } from './ui.jsx';
+import { splitEmails, formatIsoMinute as formatIso } from '../utils.js';
 
-// 4 个常用 cron 预设（7 段格式）
+// 4 个常用 cron 预设（7 段格式，**按 UTC 解释**）
+// 注：这些是 UTC 时间。中国大陆用户实际本地触发时刻 +8h（如 17:30 UTC = 北京 01:30 次日）。
 const CRON_PRESETS = [
-  { label: '每周五 17:30', cron: '0 30 17 ? * FRI *' },
-  { label: '每周一 09:00', cron: '0 0 9 ? * MON *' },
-  { label: '工作日 18:00', cron: '0 0 18 ? * MON-FRI *' },
-  { label: '每周日 21:00', cron: '0 0 21 ? * SUN *' },
+  { label: '每周五 17:30 UTC', cron: '0 30 17 ? * FRI *' },
+  { label: '每周一 09:00 UTC', cron: '0 0 9 ? * MON *' },
+  { label: '工作日 18:00 UTC', cron: '0 0 18 ? * MON-FRI *' },
+  { label: '每周日 21:00 UTC', cron: '0 0 21 ? * SUN *' },
 ];
 
 const DAY_OPTIONS = [3, 7, 14, 30];
@@ -290,7 +292,7 @@ function ScheduleEditor({ initial, workspaces, templates, providers, onClose, on
 
         <FormField
           label="cron 表达式（7 段：秒 分 时 日 月 星期 年）"
-          hint="与系统 cron 不一样，UTC 时区由 tokio-cron-scheduler 处理"
+          hint="⚠ 按 UTC 时区解释。北京 +8 / 纽约 -5 等需自行换算。下次执行已换算为本地时间。"
         >
           <Mono value={cron} onChange={setCron} />
           <div className="mt-1.5 flex flex-wrap gap-1.5">
@@ -397,14 +399,4 @@ function ScheduleEditor({ initial, workspaces, templates, providers, onClose, on
   );
 }
 
-function splitEmails(text) {
-  return (text || '')
-    .split(/[,;\s]+/)
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
-}
-
-function formatIso(s) {
-  if (!s) return '';
-  return s.replace('T', ' ').slice(0, 16);
-}
+// splitEmails / formatIso 已迁移到 src/utils.js（便于单测）。导入在文件顶部。

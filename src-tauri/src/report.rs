@@ -10,7 +10,7 @@ use chrono::Local;
 use serde::{Deserialize, Serialize};
 
 use crate::llm::{self, LlmProvider};
-use crate::logs::{self, Summary};
+use crate::logs::{self, ParseStats, Summary};
 use crate::state;
 use crate::store;
 use crate::workspace::Workspace;
@@ -105,15 +105,19 @@ pub async fn run_generation(
 
     // 5. 收集 messages（单 workspace 失败不阻塞其他）
     let mut messages = Vec::new();
+    let mut parse_stats = ParseStats::default();
     for ws in &workspaces {
         match logs::collect_messages(ws, days, clip).await {
-            Ok(part) => messages.extend(part),
+            Ok((part, s)) => {
+                messages.extend(part);
+                parse_stats.merge(&s);
+            }
             Err(e) => tracing::warn!("workspace {} 收集日志失败: {:#}", ws.name, e),
         }
     }
 
     // 6. 聚合
-    let summary = logs::aggregate(messages);
+    let summary = logs::aggregate_with_stats(messages, parse_stats);
 
     // 7. 历史报告作为风格参考
     let past = load_past_reports(settings.past_reports_context as usize)?;
@@ -139,15 +143,20 @@ pub async fn run_generation(
         record: saved,
         content: markdown,
         duration_ms,
+        skipped_lines: summary.stats.skipped_lines,
+        skipped_files: summary.stats.skipped_files,
     })
 }
 
-/// 完整生成流程的输出。
+/// 完整生成流程的输出。`skipped_*` 是解析阶段计数，用于让 UI 提示用户
+/// "扫了 N 行但 M 行损坏没认出来"，避免静默丢数据。
 #[derive(Debug, Clone, Serialize)]
 pub struct GenerationOutput {
     pub record: ReportRecord,
     pub content: String,
     pub duration_ms: u64,
+    pub skipped_lines: u32,
+    pub skipped_files: u32,
 }
 
 /// 按 LLM.md §6 优先级解析 provider：显式 > 模板 > 默认 > 第一个 > 报错。
@@ -319,6 +328,8 @@ mod tests {
                 main_project: Some("weekly-report".to_string()),
                 servers: vec!["本机".to_string()],
                 tools: vec!["claude-code".to_string()],
+                skipped_lines: 0,
+                skipped_files: 0,
             },
         }
     }

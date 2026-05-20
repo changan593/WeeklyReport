@@ -90,6 +90,28 @@ pub struct SummaryStats {
     pub main_project: Option<String>,
     pub servers: Vec<String>,
     pub tools: Vec<String>,
+    /// JSONL 行解析失败计数（JSON 不合法 / 数据损坏）。
+    /// 用于让用户知道"扫了 N 行但 M 行没认出来"，避免静默丢数据。
+    pub skipped_lines: u32,
+    /// 文件级失败计数（IO 失败 / 整文件不可读）。
+    pub skipped_files: u32,
+}
+
+/// 解析时累计的统计（线程内单次收集用，可在 spawn_blocking 内传递）。
+///
+/// `skipped_lines` 只累 **JSON 解析失败** 的行 —— "type 未知"、"用户被识别为
+/// tool_result 反灌"等是设计内丢弃，不算 skip。
+#[derive(Debug, Clone, Default)]
+pub struct ParseStats {
+    pub skipped_lines: u32,
+    pub skipped_files: u32,
+}
+
+impl ParseStats {
+    pub fn merge(&mut self, other: &ParseStats) {
+        self.skipped_lines += other.skipped_lines;
+        self.skipped_files += other.skipped_files;
+    }
 }
 
 /// `ai_snippets` 上限；超过这个数后按时间排序取最新 N 条。
@@ -109,7 +131,7 @@ pub async fn collect_messages(
     ws: &Workspace,
     days: u32,
     clip_chars: usize,
-) -> Result<Vec<Message>> {
+) -> Result<(Vec<Message>, ParseStats)> {
     let (claude_root, codex_root) = match ws.kind {
         WorkspaceKind::Local => local_roots(ws),
         WorkspaceKind::Ssh => {
@@ -161,31 +183,41 @@ fn collect_from_paths(
     codex_root: Option<&Path>,
     since: DateTime<Local>,
     clip_chars: usize,
-) -> Vec<Message> {
+) -> (Vec<Message>, ParseStats) {
     let mut out = Vec::new();
+    let mut stats = ParseStats::default();
     if let Some(p) = claude_root {
         if p.is_dir() {
-            out.extend(claude::collect(p, server_name, since, clip_chars));
+            let (msgs, s) = claude::collect(p, server_name, since, clip_chars);
+            out.extend(msgs);
+            stats.merge(&s);
         }
     }
     if let Some(p) = codex_root {
         if p.is_dir() {
-            out.extend(codex::collect(p, server_name, since, clip_chars));
+            let (msgs, s) = codex::collect(p, server_name, since, clip_chars);
+            out.extend(msgs);
+            stats.merge(&s);
         }
     }
-    out
+    (out, stats)
 }
 
 // ============================================================
 // 聚合
 // ============================================================
 
-/// 把 Messages 聚合成 Summary。
+/// 把 Messages 聚合成 Summary，并合入解析阶段的 ParseStats（跳过行/文件计数）。
 ///
 /// - 按时间排序；同项目内前 30 字符相同的相邻用户 prompt 视为重复，去重
 /// - 助手文本取**最新** AI_SNIPPETS_LIMIT 条
-/// - stats：总指令数、活跃天数（按 Local 日期去重）、项目数、主项目、servers、tools
-pub fn aggregate(mut messages: Vec<Message>) -> Summary {
+/// - stats：总指令数、活跃天数（按 Local 日期去重）、项目数、主项目、servers、tools、
+///   skipped_lines / skipped_files
+pub fn aggregate(messages: Vec<Message>) -> Summary {
+    aggregate_with_stats(messages, ParseStats::default())
+}
+
+pub fn aggregate_with_stats(mut messages: Vec<Message>, parse_stats: ParseStats) -> Summary {
     messages.sort_by_key(|m| (m.ts, m.project.clone()));
 
     let mut by_project: HashMap<String, Vec<String>> = HashMap::new();
@@ -244,6 +276,8 @@ pub fn aggregate(mut messages: Vec<Message>) -> Summary {
         main_project,
         servers: servers.into_iter().collect(),
         tools: tools.into_iter().collect(),
+        skipped_lines: parse_stats.skipped_lines,
+        skipped_files: parse_stats.skipped_files,
     };
 
     Summary {
@@ -540,10 +574,12 @@ mod tests {
         };
 
         // 用大窗口确保 fixture 时间戳都在窗口内；按文件 mtime 也保证（刚 write）
-        let messages = collect_messages(&ws, 365 * 100, 200).await.unwrap();
+        let (messages, parse_stats) = collect_messages(&ws, 365 * 100, 200).await.unwrap();
         assert!(!messages.is_empty(), "fixtures 应至少产出一些 messages");
+        assert_eq!(parse_stats.skipped_lines, 0, "fixture 应全部合法");
+        assert_eq!(parse_stats.skipped_files, 0);
 
-        let summary = aggregate(messages);
+        let summary = aggregate_with_stats(messages, parse_stats);
         assert!(summary.stats.total_prompts > 0);
         assert!(
             summary.stats.tools.iter().any(|t| t == "claude-code"),
@@ -580,7 +616,70 @@ mod tests {
             tools: vec!["claude-code".into(), "codex".into()],
             ..Default::default()
         };
-        let msgs = collect_messages(&ws, 7, 200).await.unwrap();
+        let (msgs, stats) = collect_messages(&ws, 7, 200).await.unwrap();
         assert!(msgs.is_empty());
+        assert_eq!(stats.skipped_files, 0);
+    }
+
+    // -------- ParseStats / skipped 计数 --------
+
+    #[tokio::test]
+    async fn collect_counts_broken_lines() {
+        // 临时目录中放一个含损坏行的 Claude session JSONL
+        let root = std::env::temp_dir().join(format!(
+            "weekly-report-logs-broken-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let claude = root.join(".claude");
+        std::fs::create_dir_all(claude.join("projects/proj-a")).unwrap();
+        std::fs::write(
+            claude.join("projects/proj-a/sess.jsonl"),
+            "{\"type\":\"user\",\"timestamp\":\"2026-05-17T10:00:00Z\",\"cwd\":\"/p\",\"message\":{\"role\":\"user\",\"content\":\"valid\"}}\n\
+             { not valid json\n\
+             also { broken\n",
+        )
+        .unwrap();
+
+        let ws = Workspace {
+            id: "w1".into(),
+            name: "test".into(),
+            kind: WorkspaceKind::Local,
+            claude_path: Some(claude.to_string_lossy().into_owned()),
+            tools: vec!["claude-code".into()],
+            ..Default::default()
+        };
+
+        let (msgs, stats) = collect_messages(&ws, 365 * 100, 200).await.unwrap();
+        assert_eq!(msgs.len(), 1, "应解析出 1 条合法消息");
+        assert_eq!(stats.skipped_lines, 2, "应计入 2 行损坏 JSON");
+        assert_eq!(stats.skipped_files, 0);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn parse_stats_merge() {
+        let mut a = ParseStats {
+            skipped_lines: 3,
+            skipped_files: 1,
+        };
+        let b = ParseStats {
+            skipped_lines: 5,
+            skipped_files: 2,
+        };
+        a.merge(&b);
+        assert_eq!(a.skipped_lines, 8);
+        assert_eq!(a.skipped_files, 3);
+    }
+
+    #[test]
+    fn aggregate_with_stats_propagates_skipped_counts() {
+        let stats = ParseStats {
+            skipped_lines: 7,
+            skipped_files: 2,
+        };
+        let s = aggregate_with_stats(Vec::new(), stats);
+        assert_eq!(s.stats.skipped_lines, 7);
+        assert_eq!(s.stats.skipped_files, 2);
     }
 }
