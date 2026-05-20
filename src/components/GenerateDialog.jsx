@@ -166,7 +166,9 @@ export default function GenerateDialog({ onClose, onGenerated }) {
             </>
           )}
           {step === 'generating' && (
-            <SecondaryButton disabled>正在生成…</SecondaryButton>
+            <SecondaryButton onClick={onClose} title="后端会继续生成，完成后报告仍会存档">
+              后台继续，关闭窗口
+            </SecondaryButton>
           )}
           {step === 'error' && (
             <>
@@ -300,6 +302,9 @@ function GeneratingStep() {
       <p className="text-[14px] font-medium text-stone-900">正在生成周报…</p>
       <p className="mt-1 text-[12px] text-stone-500">
         扫描日志 → 压缩聚合 → 调用 LLM，最长 120 秒
+      </p>
+      <p className="mt-3 text-[11.5px] text-stone-400">
+        可点底部按钮关闭窗口，生成会在后台继续，完成后报告自动存档到「历史周报」
       </p>
     </div>
   );
