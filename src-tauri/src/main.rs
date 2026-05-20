@@ -3,12 +3,30 @@
 
 use tracing_subscriber::EnvFilter;
 
-/// 阶段 0：仅启动一个空白 Tauri 窗口。
+mod email;
+mod llm;
+mod report;
+mod scheduler;
+mod state;
+mod store;
+mod workspace;
+
+/// 应用入口。
 ///
-/// 后续阶段会在此注册全部 Tauri command（见 docs/ARCHITECTURE.md#310-mainrs--tauri-入口），
-/// 并初始化 store 和 scheduler。
+/// 启动顺序：
+/// 1. 初始化 tracing 日志
+/// 2. 初始化存储目录（创建 OS 配置目录 + `reports/` 子目录）
+/// 3. 首次启动时创建默认本机工作区
+/// 4. 启动 Tauri 主循环（command 注册由后续阶段补全，详见
+///    `docs/ARCHITECTURE.md#310-mainrs--tauri-入口`）
 fn main() {
     init_tracing();
+
+    if let Err(err) = store::init() {
+        tracing::error!("初始化存储失败: {:#}", err);
+    } else if let Err(err) = state::ensure_default_workspace() {
+        tracing::error!("初始化默认工作区失败: {:#}", err);
+    }
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
