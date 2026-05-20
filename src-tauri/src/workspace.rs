@@ -46,6 +46,56 @@ pub struct Workspace {
     pub tools: Vec<String>,
 }
 
+/// 测试 workspace 连接。
+///
+/// - `Local`：检查 claude_path / codex_path 是否存在，返回多行报告
+/// - `Ssh`：调用 `crate::ssh::test`（阶段 6 实现，目前直接报错）
+///
+/// 返回的字符串可直接渲染到 UI 的 StatusBanner。
+pub async fn test_connection(ws: &Workspace) -> anyhow::Result<String> {
+    match ws.kind {
+        WorkspaceKind::Local => Ok(test_local(ws)),
+        WorkspaceKind::Ssh => Err(anyhow::anyhow!("SSH 工作区连接测试尚未实现（阶段 6）")),
+    }
+}
+
+fn test_local(ws: &Workspace) -> String {
+    let mut lines = Vec::new();
+    lines.push(format!("✓ 本机工作区「{}」", ws.name));
+
+    let want_claude = ws.tools.iter().any(|t| t == "claude-code");
+    let want_codex = ws.tools.iter().any(|t| t == "codex");
+
+    if !want_claude && !want_codex {
+        lines.push("⚠ 未启用任何工具，请至少勾选 Claude Code 或 Codex".into());
+        return lines.join("\n");
+    }
+
+    if want_claude {
+        let raw = ws.claude_path.as_deref().unwrap_or("~/.claude");
+        let expanded = expand_tilde(raw);
+        let exists = std::path::Path::new(&expanded).is_dir();
+        let mark = if exists { "✓" } else { "✗" };
+        lines.push(format!(
+            "{mark} Claude Code 路径{}：{expanded}",
+            if exists { "存在" } else { "不存在" }
+        ));
+    }
+
+    if want_codex {
+        let raw = ws.codex_path.as_deref().unwrap_or("~/.codex");
+        let expanded = expand_tilde(raw);
+        let exists = std::path::Path::new(&expanded).is_dir();
+        let mark = if exists { "✓" } else { "✗" };
+        lines.push(format!(
+            "{mark} Codex 路径{}：{expanded}",
+            if exists { "存在" } else { "不存在" }
+        ));
+    }
+
+    lines.join("\n")
+}
+
 /// 把路径中的 `~` 展开为用户家目录。失败时原样返回。
 ///
 /// 仅处理形如 `~`、`~/foo` 的路径，不支持 `~user/` 这种 POSIX 形式。
