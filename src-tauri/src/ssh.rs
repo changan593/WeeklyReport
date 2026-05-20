@@ -277,6 +277,25 @@ fn windows_to_msys_path(s: &str) -> String {
     format!("/{drive}{rest}")
 }
 
+/// 把 ssh `-i` 私钥路径转成 rsync `-e` 字符串里可安全嵌入的形式。
+///
+/// rsync 把 `-e` 参数当作类 shell 字符串再次 tokenize（按空格分割，支持引号、
+/// 反斜杠转义）。Windows 上 `C:\Users\foo\.ssh\key` 里的 `\U`、`\.` 会被
+/// tokenizer 当成转义字符吃掉，导致 ssh 收到的私钥路径错乱，公钥认证失败 →
+/// 回退到密码 prompt → rsync 拿不到响应 → 0 字节关闭（exit 12）。
+///
+/// 解决方式：
+/// - Windows：反斜杠转正斜杠（`ssh.exe` 也接受正斜杠路径）
+/// - 整体用单引号包围以容忍空格；内部单引号按 POSIX 规则转义为 `'\''`
+fn quote_key_for_rsync_e(p: &str) -> String {
+    let normalized = if cfg!(target_os = "windows") {
+        p.replace('\\', "/")
+    } else {
+        p.to_string()
+    };
+    format!("'{}'", normalized.replace('\'', r"'\''"))
+}
+
 fn require_ssh(ws: &Workspace) -> Result<()> {
     if ws.kind != WorkspaceKind::Ssh {
         return Err(anyhow!("不是 SSH 工作区"));
@@ -398,8 +417,7 @@ fn build_rsync_ssh_arg(ws: &Workspace) -> String {
             s.push_str(" -o BatchMode=yes");
             if let Some(k) = ws.ssh_key.as_deref() {
                 if !k.is_empty() {
-                    // 简单引用：路径中有空格时会出问题，但用户的私钥路径几乎不会有空格
-                    s.push_str(&format!(" -i {}", expand_tilde(k)));
+                    s.push_str(&format!(" -i {}", quote_key_for_rsync_e(&expand_tilde(k))));
                 }
             }
         }
@@ -535,7 +553,9 @@ mod tests {
         assert!(s.starts_with("ssh "));
         assert!(s.contains("BatchMode=yes"));
         assert!(s.contains("-p 2200"));
-        assert!(s.contains("-i "));
+        // 私钥路径必须用单引号包围，避免 rsync 的 -e tokenizer 把反斜杠当转义
+        assert!(s.contains("-i '"));
+        assert!(s.contains("/.ssh/id_ed25519'"));
     }
 
     #[test]
@@ -767,5 +787,45 @@ mod tests {
     fn windows_to_msys_path_requires_separator_after_colon() {
         // `C:foo`（无分隔符）不是有效的绝对盘符路径，保持原样不强行转换
         assert_eq!(windows_to_msys_path("C:foo"), "C:foo");
+    }
+
+    // -------- quote_key_for_rsync_e（私钥路径嵌入 rsync -e 字符串） --------
+
+    #[test]
+    fn quote_key_for_rsync_e_wraps_in_single_quotes() {
+        let q = quote_key_for_rsync_e("/home/me/.ssh/id_ed25519");
+        // 整体必须被单引号包围
+        assert!(q.starts_with('\''));
+        assert!(q.ends_with('\''));
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn quote_key_for_rsync_e_unix_keeps_path() {
+        assert_eq!(
+            quote_key_for_rsync_e("/home/me/.ssh/id_ed25519"),
+            "'/home/me/.ssh/id_ed25519'"
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn quote_key_for_rsync_e_windows_converts_backslash() {
+        // 反斜杠转正斜杠，避免被 rsync -e tokenizer 当成转义
+        assert_eq!(
+            quote_key_for_rsync_e(r"C:\Users\me\.ssh\id_ed25519"),
+            "'C:/Users/me/.ssh/id_ed25519'"
+        );
+    }
+
+    #[test]
+    fn quote_key_for_rsync_e_escapes_inner_single_quote() {
+        // 路径里出现单引号（极罕见但合法）：POSIX 转义 → `'\''`
+        let q = quote_key_for_rsync_e("/home/me's/.ssh/id");
+        // 整体外层仍是单引号
+        assert!(q.starts_with('\''));
+        assert!(q.ends_with('\''));
+        // 内部单引号被 `'\''` 序列分隔
+        assert!(q.contains(r"'\''"));
     }
 }

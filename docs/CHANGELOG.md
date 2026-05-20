@@ -18,6 +18,12 @@
   远端 `host=C` + `path=\Users\…`，与远端源同时使用时报 `source and destination
   cannot both be remote`。新增 `local_path_for_rsync`，在 Windows 上把本地缓存
   路径转成 MSYS2 POSIX 风格（`/c/Users/…`）后再传给 rsync。
+- Windows 下 SSH 公钥认证 rsync 失败（exit 12，`connection unexpectedly
+  closed`）：rsync 把 `-e` 参数当类 shell 字符串再次 tokenize，私钥路径
+  `C:\Users\foo\.ssh\key` 里的 `\U`、`\.` 被吃成转义字符，导致 ssh 收到
+  错误路径、公钥认证失败、回退密码 prompt、连接被关闭。新增
+  `quote_key_for_rsync_e`：Windows 上反斜杠转正斜杠，整体用单引号包围以
+  容忍空格和特殊字符。
 
 ---
 
