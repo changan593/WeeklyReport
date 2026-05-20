@@ -56,13 +56,13 @@ pub async fn test(ws: &Workspace) -> Result<String> {
     if want_claude {
         script.push_str(&format!(
             " && (test -d {} && echo CLAUDE_OK || echo CLAUDE_MISSING)",
-            sh_quote(claude_path)
+            sh_quote_remote_path(claude_path)
         ));
     }
     if want_codex {
         script.push_str(&format!(
             " && (test -d {} && echo CODEX_OK || echo CODEX_MISSING)",
-            sh_quote(codex_path)
+            sh_quote_remote_path(codex_path)
         ));
     }
 
@@ -404,6 +404,23 @@ fn sh_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
+/// 远端路径专用引用：开头的 `~/` 替换为 `"$HOME"` 让远端 shell 展开家目录，
+/// 其余部分仍走 `sh_quote` 单引号转义。
+///
+/// 普通 `sh_quote` 把整个路径包进单引号，会顺带把 `~` 也当字面字符，导致远端
+/// `test -d '~/.claude'` 找不到目录。本函数只在开头特判 `~`/`~/`，命令注入抵御
+/// 能力跟 `sh_quote` 一致（注入字符仍被关在单引号里）。
+fn sh_quote_remote_path(s: &str) -> String {
+    if s == "~" {
+        return "\"$HOME\"".to_string();
+    }
+    if let Some(rest) = s.strip_prefix("~/") {
+        // 例如 ~/.claude -> "$HOME"'/.claude'
+        return format!("\"$HOME\"{}", sh_quote(&format!("/{rest}")));
+    }
+    sh_quote(s)
+}
+
 // ============================================================
 // 测试
 // ============================================================
@@ -624,6 +641,44 @@ mod tests {
         // $ 和 ` 在双引号内会被展开，但在单引号内是普通字符
         assert_eq!(sh_quote("$PATH"), "'$PATH'");
         assert_eq!(sh_quote("`whoami`"), "'`whoami`'");
+    }
+
+    // -------- sh_quote_remote_path（远端路径的 ~ 展开） --------
+
+    #[test]
+    fn sh_quote_remote_path_expands_leading_tilde_slash() {
+        // ~/.claude -> "$HOME"'/.claude'
+        assert_eq!(sh_quote_remote_path("~/.claude"), "\"$HOME\"'/.claude'");
+        assert_eq!(sh_quote_remote_path("~/work/logs"), "\"$HOME\"'/work/logs'");
+    }
+
+    #[test]
+    fn sh_quote_remote_path_expands_bare_tilde() {
+        assert_eq!(sh_quote_remote_path("~"), "\"$HOME\"");
+    }
+
+    #[test]
+    fn sh_quote_remote_path_leaves_absolute_paths_alone() {
+        assert_eq!(
+            sh_quote_remote_path("/home/changan/.claude"),
+            "'/home/changan/.claude'"
+        );
+    }
+
+    #[test]
+    fn sh_quote_remote_path_leaves_mid_tilde_alone() {
+        // 路径中间的 ~ 不当作家目录，保持字面意义
+        assert_eq!(sh_quote_remote_path("/x/~/y"), "'/x/~/y'");
+    }
+
+    #[test]
+    fn sh_quote_remote_path_blocks_injection_after_tilde() {
+        // 攻击者填 ~/foo; rm -rf ~ —— $HOME 在外面，分号和 rm 仍被单引号关住
+        let q = sh_quote_remote_path("~/foo; rm -rf ~");
+        assert!(q.starts_with("\"$HOME\""));
+        assert!(q.contains("'/foo; rm -rf ~'"));
+        // 整个尾段必须仍在单引号内
+        assert!(q.ends_with('\''));
     }
 
     #[tokio::test]
