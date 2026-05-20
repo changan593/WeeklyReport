@@ -6,7 +6,7 @@
 #![allow(dead_code)]
 
 use anyhow::{anyhow, Result};
-use chrono::{Datelike, Local};
+use chrono::{Datelike, Local, Utc};
 use cron::Schedule as CronSchedule;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -223,13 +223,22 @@ pub fn render_subject(tpl: &str, _record: &ReportRecord) -> String {
 // next_run_time
 // ============================================================
 
-/// 计算给定 cron 表达式的下一次运行时间（本地时区，ISO 8601）。
+/// 计算给定 cron 表达式的下一次运行时间，返回 **本地时区** ISO 8601。
+///
+/// **关键**：tokio-cron-scheduler 内部按 UTC 解释 cron 表达式（即 `0 0 9 * * *`
+/// 意为 UTC 9 点）。本函数为保持显示与实际触发一致，**也按 UTC 解析**，再把
+/// 结果换算成 Local 显示给用户。
+///
+/// 这意味着：
+/// - 用户填的 cron 表达式应该按 UTC 思考（UI 必须明示）
+/// - "下次执行" 显示的是该 cron 实际触发时刻在用户当地时区的对应时刻
 ///
 /// 解析失败时返回 None；不抛错，便于 UI 兜底显示"—"。
 pub fn next_run_time(cron: &str) -> Option<String> {
     let sch = CronSchedule::from_str(cron).ok()?;
-    let next = sch.upcoming(Local).next()?;
-    Some(next.to_rfc3339())
+    let next_utc = sch.upcoming(Utc).next()?;
+    let next_local = next_utc.with_timezone(&Local);
+    Some(next_local.to_rfc3339())
 }
 
 // ============================================================
