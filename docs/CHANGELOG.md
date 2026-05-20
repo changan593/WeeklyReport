@@ -13,6 +13,12 @@
 - 真实图标资源（替换占位 PNG，使用 `cargo tauri icon` 生成）
 - GitHub Actions CI（三平台并行构建 + tag 触发发布）
 
+### Fixed
+- Windows 下 SSH 工作区 rsync 失败：MSYS2 编译的 rsync 把 `C:\Users\…` 误认成
+  远端 `host=C` + `path=\Users\…`，与远端源同时使用时报 `source and destination
+  cannot both be remote`。新增 `local_path_for_rsync`，在 Windows 上把本地缓存
+  路径转成 MSYS2 POSIX 风格（`/c/Users/…`）后再传给 rsync。
+
 ---
 
 ## [0.1.0] - 待发布

@@ -190,9 +190,7 @@ async fn rsync_jsonl(
     // 远端路径末尾加 `/` 让 rsync 按子树同步而非顶层目录。
     let trimmed = remote.trim_end_matches('/');
     let src = format!("{user}@{host}:{trimmed}/");
-    let local_str = local
-        .to_str()
-        .ok_or_else(|| anyhow!("缓存路径不是 UTF-8: {}", local.display()))?;
+    let local_str = local_path_for_rsync(local)?;
 
     let mut cmd = Command::new("rsync");
     cmd.args([
@@ -203,7 +201,7 @@ async fn rsync_jsonl(
         "-e",
         ssh_e_arg,
         &src,
-        local_str,
+        &local_str,
     ]);
     if let Some(pw) = password {
         cmd.env(SSHPASS_ENV, pw);
@@ -235,6 +233,49 @@ async fn rsync_jsonl(
 // ============================================================
 // 工具
 // ============================================================
+
+/// 把本地缓存目录转成 rsync 可识别的路径字符串。
+///
+/// rsync 用冒号区分本地/远端（`user@host:path`）。Windows 上的本地路径
+/// `C:\Users\foo` 会被 rsync 误判成远端 `host=C` + `path=\Users\foo`，
+/// 导致与远端源同时使用时报错 `source and destination cannot both be remote`。
+/// MSYS2 编译的 rsync 期望本地路径用 POSIX 风格 `/c/Users/foo`。
+///
+/// 在非 Windows 平台原样返回。
+fn local_path_for_rsync(p: &Path) -> Result<String> {
+    let s = p
+        .to_str()
+        .ok_or_else(|| anyhow!("缓存路径不是 UTF-8: {}", p.display()))?;
+    #[cfg(target_os = "windows")]
+    {
+        return Ok(windows_to_msys_path(s));
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Ok(s.to_string())
+    }
+}
+
+/// 把 Windows 路径转成 MSYS2 POSIX 风格：`C:\foo\bar` → `/c/foo/bar`。
+///
+/// 仅当字符串符合 `<盘符>:<分隔符>...` 时转换，否则原样返回。
+/// 即使在非 Windows 平台编译，也保留此函数以便单元测试覆盖纯字符串逻辑。
+fn windows_to_msys_path(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let looks_like_drive = bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/');
+    if !looks_like_drive {
+        return s.to_string();
+    }
+    let drive = (bytes[0] as char).to_ascii_lowercase();
+    let rest: String = s[2..]
+        .chars()
+        .map(|c| if c == '\\' { '/' } else { c })
+        .collect();
+    format!("/{drive}{rest}")
+}
 
 fn require_ssh(ws: &Workspace) -> Result<()> {
     if ws.kind != WorkspaceKind::Ssh {
@@ -686,5 +727,45 @@ mod tests {
         let mut ws = ssh_ws();
         ws.kind = WorkspaceKind::Local;
         assert!(sync_to_cache(&ws).await.is_err());
+    }
+
+    // -------- windows_to_msys_path（Windows 本地路径转 MSYS2 POSIX 风格） --------
+
+    #[test]
+    fn windows_to_msys_path_converts_backslash_drive() {
+        assert_eq!(windows_to_msys_path(r"C:\Users\me\foo"), "/c/Users/me/foo");
+        assert_eq!(windows_to_msys_path(r"D:\path\to\dir"), "/d/path/to/dir");
+    }
+
+    #[test]
+    fn windows_to_msys_path_converts_forward_slash_drive() {
+        // Rust 的 Path 在 Windows 上也接受正斜杠
+        assert_eq!(windows_to_msys_path("C:/Users/me"), "/c/Users/me");
+    }
+
+    #[test]
+    fn windows_to_msys_path_lowercases_drive_letter() {
+        assert_eq!(windows_to_msys_path(r"G:\proj"), "/g/proj");
+    }
+
+    #[test]
+    fn windows_to_msys_path_leaves_posix_paths_alone() {
+        assert_eq!(windows_to_msys_path("/home/user/cache"), "/home/user/cache");
+        assert_eq!(windows_to_msys_path("relative/path"), "relative/path");
+    }
+
+    #[test]
+    fn windows_to_msys_path_leaves_unc_alone() {
+        // UNC 路径 \\server\share —— 不符合「盘符 + 冒号」格式，原样返回
+        assert_eq!(
+            windows_to_msys_path(r"\\server\share\file"),
+            r"\\server\share\file"
+        );
+    }
+
+    #[test]
+    fn windows_to_msys_path_requires_separator_after_colon() {
+        // `C:foo`（无分隔符）不是有效的绝对盘符路径，保持原样不强行转换
+        assert_eq!(windows_to_msys_path("C:foo"), "C:foo");
     }
 }
