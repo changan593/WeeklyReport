@@ -77,9 +77,12 @@ npm run tauri:build        # 打包发布版
 | [docs/SPEC.md](./docs/SPEC.md)                    | 完整功能规格                         |
 | [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md)    | 技术架构、模块划分、数据模型         |
 | [docs/LLM.md](./docs/LLM.md)                      | 多 LLM 源协议抽象                    |
+| [docs/JSONL.md](./docs/JSONL.md)                  | Claude Code / Codex CLI 日志 schema  |
 | [docs/UI.md](./docs/UI.md)                        | UI / UX 规格                         |
 | [docs/TASKS.md](./docs/TASKS.md)                  | 分阶段实现计划                       |
 | [docs/DECISIONS.md](./docs/DECISIONS.md)          | 架构决策记录                         |
+| [docs/CONTRIBUTING.md](./docs/CONTRIBUTING.md)    | 贡献指南（开发流程、规范）           |
+| [docs/CHANGELOG.md](./docs/CHANGELOG.md)          | 版本变更记录                         |
 
 ## 贡献
 
