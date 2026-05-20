@@ -18,6 +18,17 @@ pub enum WorkspaceKind {
     Ssh,
 }
 
+/// SSH 认证方式：公钥（默认）或密码。
+///
+/// 密码方式依赖系统已安装 `sshpass` 命令；详见 `crate::ssh`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SshAuthMethod {
+    #[default]
+    Key,
+    Password,
+}
+
 /// 一个日志来源（本机或远程 SSH 服务器）。
 ///
 /// JSON 字段 `type` 对应 Rust 字段 `kind`。
@@ -34,8 +45,15 @@ pub struct Workspace {
     pub user: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port: Option<u16>,
+    /// SSH 认证方式。缺省（旧配置）按 `Key` 处理。
+    #[serde(default)]
+    pub auth_method: SshAuthMethod,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssh_key: Option<String>,
+    /// SSH 登录密码。仅在 `auth_method = Password` 时使用。
+    /// 与 LLM API key 一致以明文存储（见 ADR-008）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_password: Option<String>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claude_path: Option<String>,
@@ -124,6 +142,33 @@ mod tests {
         assert_eq!(json, "\"local\"");
         let json = serde_json::to_string(&WorkspaceKind::Ssh).unwrap();
         assert_eq!(json, "\"ssh\"");
+    }
+
+    #[test]
+    fn auth_method_serializes_lowercase_default_key() {
+        assert_eq!(
+            serde_json::to_string(&SshAuthMethod::Key).unwrap(),
+            "\"key\""
+        );
+        assert_eq!(
+            serde_json::to_string(&SshAuthMethod::Password).unwrap(),
+            "\"password\""
+        );
+        assert_eq!(SshAuthMethod::default(), SshAuthMethod::Key);
+    }
+
+    #[test]
+    fn workspace_deserializes_without_auth_method() {
+        // 兼容旧配置（没有 auth_method 字段）
+        let json = serde_json::json!({
+            "id": "w1",
+            "name": "服务器",
+            "type": "ssh",
+            "host": "example.com",
+        });
+        let ws: Workspace = serde_json::from_value(json).unwrap();
+        assert_eq!(ws.auth_method, SshAuthMethod::Key);
+        assert!(ws.ssh_password.is_none());
     }
 
     #[test]

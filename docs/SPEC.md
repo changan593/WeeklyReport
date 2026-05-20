@@ -35,7 +35,9 @@ WeeklyReport 是一个跨平台桌面应用，提供以下核心能力：
 | `host`         | string?           | SSH only                                          |
 | `user`         | string?           | SSH only                                          |
 | `port`         | u16?              | SSH only，默认 22                                 |
-| `ssh_key`      | string?           | SSH 私钥路径，留空使用系统默认                    |
+| `auth_method`  | `"key"` \| `"password"` | SSH 认证方式，默认 `"key"`                  |
+| `ssh_key`      | string?           | SSH 私钥路径，留空使用系统默认；`auth_method=key` 时使用 |
+| `ssh_password` | string?           | SSH 登录密码；`auth_method=password` 时使用，明文存储 |
 | `claude_path`  | string?           | Claude Code 日志根目录，默认 `~/.claude`          |
 | `codex_path`   | string?           | Codex CLI 日志根目录，默认 `~/.codex`             |
 | `tools`        | string[]          | 启用的工具：`["claude-code", "codex"]` 子集       |

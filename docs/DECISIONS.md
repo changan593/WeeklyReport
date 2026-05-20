@@ -246,6 +246,43 @@ LLM API key 和 SMTP 密码需要持久化。
 
 ---
 
+## ADR-012：SSH 密码认证通过 sshpass，密码经 SSHPASS 环境变量传入
+
+**状态：** ✅ 已接受
+
+**背景：**
+
+部分用户的远程服务器只开放密码登录，或不希望分发公钥。需要在公钥之外提供
+密码认证选项，仍然走 ADR-010 决定的系统命令路线，避免引入 `ssh2` crate。
+
+**选项：**
+
+| 方案                                  | 优点                       | 缺点                                       |
+| ------------------------------------- | -------------------------- | ------------------------------------------ |
+| `expect`/`pty` 自行驱动 ssh 交互      | 不依赖额外二进制           | 跨平台 PTY 实现复杂，易卡死，难测试        |
+| `sshpass -p <pw> ssh ...`             | 命令简单                   | 密码出现在 `ps` 输出，泄露给同机用户       |
+| **`SSHPASS=<pw> sshpass -e ssh ...`** | 密码不进命令行             | 仍需用户安装 sshpass                       |
+| 切换到 `ssh2` / `russh` crate         | 一致 API                   | 违反 ADR-010，增加编译复杂度与二进制体积   |
+
+**决策：** 用 `sshpass -e ssh ...`，密码通过 `SSHPASS` 环境变量传入子进程。
+
+**理由：**
+- 与 ADR-010 一致：仍然是系统命令子进程，零新增 Rust 依赖
+- `SSHPASS` 环境变量比 `-p` 安全：密码不出现在 `ps`、`bash` 历史里
+- `sshpass` 在 Linux/macOS 包管理器里都有；Windows 用户走公钥（已在错误提示里说明）
+- 密码方式必须额外把 ssh 选项里的 `BatchMode=yes` 去掉，并加
+  `PreferredAuthentications=password,keyboard-interactive` + `PubkeyAuthentication=no`，
+  防止 ssh 在密码可用时仍然先试公钥并卡 known_hosts
+
+**实现约束：**
+- `Workspace.auth_method`：`"key"`（默认）/ `"password"` 二选一
+- 密码方式下 `ssh_password` 不能为空，前置校验给出明确错误
+- `sshpass` 未安装时，连接测试直接返回带安装指南的中文错误，不去尝试连接
+- 密码与 LLM API key 一致以明文保存（ADR-008，v0.2.0 整体迁移到 keyring）
+- `sshpass` 退出码 5 = 密码错误，错误信息单独识别成「SSH 密码错误」
+
+---
+
 ## ADR-011：JSONL 解析使用 `serde_json::Value` 而非强类型 struct
 
 **状态：** ✅ 已接受

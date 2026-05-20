@@ -146,7 +146,9 @@ function emptyWorkspace() {
     host: '',
     user: '',
     port: 22,
+    auth_method: 'key',
     ssh_key: '',
+    ssh_password: '',
     claude_path: '~/.claude',
     codex_path: '~/.codex',
     tools: ['claude-code', 'codex'],
@@ -255,9 +257,53 @@ function WorkspaceEditor({ initial, onClose, onSaved }) {
                 placeholder="22"
               />
             </FormField>
-            <FormField label="SSH 私钥路径（可选）" className="col-span-2" hint="留空使用系统默认 ~/.ssh/id_rsa">
-              <Mono value={ws.ssh_key} onChange={(v) => set('ssh_key', v)} placeholder="~/.ssh/id_ed25519" />
+            <FormField label="认证方式" className="col-span-2">
+              <div className="inline-flex rounded-md border border-stone-200 p-0.5">
+                {[
+                  { v: 'key', label: '私钥' },
+                  { v: 'password', label: '密码' },
+                ].map((opt) => (
+                  <button
+                    key={opt.v}
+                    type="button"
+                    onClick={() => set('auth_method', opt.v)}
+                    className={`rounded px-3 py-1 text-[12.5px] ${
+                      (ws.auth_method || 'key') === opt.v
+                        ? 'bg-stone-900 text-white'
+                        : 'text-stone-600 hover:text-stone-900'
+                    }`}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
             </FormField>
+            {(ws.auth_method || 'key') === 'key' ? (
+              <FormField
+                label="SSH 私钥路径（可选）"
+                className="col-span-2"
+                hint="留空使用系统默认 ~/.ssh/id_rsa"
+              >
+                <Mono
+                  value={ws.ssh_key}
+                  onChange={(v) => set('ssh_key', v)}
+                  placeholder="~/.ssh/id_ed25519"
+                />
+              </FormField>
+            ) : (
+              <FormField
+                label="SSH 密码"
+                className="col-span-2"
+                hint="需要系统安装 sshpass；密码以明文存于本地配置文件"
+              >
+                <Input
+                  type="password"
+                  value={ws.ssh_password}
+                  onChange={(v) => set('ssh_password', v)}
+                  placeholder="登录密码"
+                />
+              </FormField>
+            )}
           </div>
         )}
 
