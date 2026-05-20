@@ -62,6 +62,16 @@ jobs:
         working-directory: src-tauri
         run: cargo test --all
 
+  audit:
+    name: cargo audit (security advisories)
+    runs-on: ubuntu-latest
+    # 只在 Linux 跑一次，其他平台的 deps 相同
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rustsec/audit-check@v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
   frontend:
     name: frontend
     runs-on: ubuntu-latest
