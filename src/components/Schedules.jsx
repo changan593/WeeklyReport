@@ -35,6 +35,7 @@ import {
   Textarea,
   Toggle,
 } from './ui.jsx';
+import { splitEmails, formatIsoMinute as formatIso } from '../utils.js';
 
 // 4 个常用 cron 预设（7 段格式，**按 UTC 解释**）
 // 注：这些是 UTC 时间。中国大陆用户实际本地触发时刻 +8h（如 17:30 UTC = 北京 01:30 次日）。
@@ -398,14 +399,4 @@ function ScheduleEditor({ initial, workspaces, templates, providers, onClose, on
   );
 }
 
-function splitEmails(text) {
-  return (text || '')
-    .split(/[,;\s]+/)
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
-}
-
-function formatIso(s) {
-  if (!s) return '';
-  return s.replace('T', ' ').slice(0, 16);
-}
+// splitEmails / formatIso 已迁移到 src/utils.js（便于单测）。导入在文件顶部。

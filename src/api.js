@@ -190,14 +190,6 @@ export function useAsyncState(loader, deps = []) {
   return [data, loading, reload, error];
 }
 
-/// 把 Tauri command 错误（Error 实例或字符串）统一转为可读字符串。
-export function formatError(e) {
-  if (!e) return '未知错误';
-  if (typeof e === 'string') return e;
-  if (e.message) return e.message;
-  try {
-    return JSON.stringify(e);
-  } catch (_) {
-    return String(e);
-  }
-}
+// formatError 已迁移到 src/utils.js（便于单测且与 Tauri 解耦）。这里 re-export
+// 让既有调用方 `import { formatError } from '../api.js'` 继续工作。
+export { formatError } from './utils.js';
