@@ -1,0 +1,4 @@
+{"type":"user","timestamp":"2026-05-17T10:23:45Z","uuid":"u1","sessionId":"s1","cwd":"/Users/me/weekly-report","gitBranch":"main","message":{"role":"user","content":"修一下 schedule 的 cron 解析"}}
+{"type":"assistant","timestamp":"2026-05-17T10:23:50Z","uuid":"a1","parentUuid":"u1","sessionId":"s1","message":{"role":"assistant","content":[{"type":"text","text":"好的，我先看一下 scheduler.rs。"}]},"costUSD":0.0012,"durationMs":520}
+{"type":"user","timestamp":"2026-05-17T10:24:30Z","uuid":"u2","sessionId":"s1","cwd":"/Users/me/weekly-report","message":{"role":"user","content":"加单元测试"}}
+{"type":"assistant","timestamp":"2026-05-17T10:24:35Z","uuid":"a2","sessionId":"s1","message":{"role":"assistant","content":[{"type":"text","text":"我会加 round-trip 和边界 case 测试。"}]}}

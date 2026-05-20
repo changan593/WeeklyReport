@@ -20,9 +20,10 @@ Read this before every significant change.
 1. [docs/SPEC.md](./docs/SPEC.md) — 功能规格（必读）
 2. [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) — 模块划分、数据模型
 3. [docs/LLM.md](./docs/LLM.md) — 多 LLM 源协议抽象（核心机制之一）
-4. [docs/UI.md](./docs/UI.md) — UI/UX 规格
-5. [docs/TASKS.md](./docs/TASKS.md) — 分阶段任务（按顺序实现）
-6. [docs/DECISIONS.md](./docs/DECISIONS.md) — 关键决策与不要做的事
+4. [docs/JSONL.md](./docs/JSONL.md) — Claude Code / Codex CLI 日志 schema（核心机制之一，写 `logs.rs` 必读）
+5. [docs/UI.md](./docs/UI.md) — UI/UX 规格
+6. [docs/TASKS.md](./docs/TASKS.md) — 分阶段任务（按顺序实现）
+7. [docs/DECISIONS.md](./docs/DECISIONS.md) — 关键决策与不要做的事
 
 ## 工作约定
 

@@ -1,0 +1,4 @@
+{"type":"user","timestamp":"2026-05-17T11:00:00Z","uuid":"u1","sessionId":"s3","cwd":"/Users/me/weekly-report","message":{"role":"user","content":"运行测试看看"}}
+{"type":"assistant","timestamp":"2026-05-17T11:00:05Z","uuid":"a1","sessionId":"s3","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu1","name":"Bash","input":{"command":"cargo test"}}]}}
+{"type":"user","timestamp":"2026-05-17T11:00:30Z","uuid":"u2","parentUuid":"a1","sessionId":"s3","toolUseResult":"test result: ok. 37 passed","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu1","content":[{"type":"text","text":"test result: ok. 37 passed"}]}]}}
+{"type":"user","timestamp":"2026-05-17T11:01:00Z","uuid":"u3","sessionId":"s3","isMeta":true,"message":{"role":"user","content":"系统注入的元消息"}}

@@ -246,6 +246,45 @@ LLM API key 和 SMTP 密码需要持久化。
 
 ---
 
+## ADR-011：JSONL 解析使用 `serde_json::Value` 而非强类型 struct
+
+**状态：** ✅ 已接受
+
+**背景：**
+
+实现 `logs.rs` 时需要解析 Claude Code 和 OpenAI Codex CLI 的 JSONL 日志。
+通过读 [openai/codex 源码](https://github.com/openai/codex/blob/main/codex-rs/protocol/src/protocol.rs)
+与 Claude Code 社区适配器，我们发现：
+
+- 两边 schema 完全不同：Claude 顶层 `type` + `message{content}`；Codex `RolloutLine { timestamp, type, payload }` 两段嵌套
+- 同一 CLI 在版本间 schema 会漂移（Codex 已知 ≥0.44 / mid / 2025-08 三套 session_meta 格式）
+- 字段呈"半结构化"：Claude `message.content` 可以是 string 也可以是 typed-block 数组；Codex `function_call.arguments` 是嵌套 JSON 字符串
+- 每个 CLI 都有罕见 `type` 值（Claude `summary` / `git-commit`、Codex `event_msg` / `compaction*`），未来还可能增加
+
+**选项：**
+
+| 方案                              | 优点                | 缺点                            |
+| --------------------------------- | ------------------- | ------------------------------- |
+| 为每种格式定义强类型 struct       | 类型安全、IDE 自动补全 | 任何 schema 变动都要改代码并重新发版 |
+| 引入 codex/claude 各自的 protocol crate | 直接复用上游定义 | 引入大量重型依赖，违反"轻量"目标 |
+| 全部用 `serde_json::Value` 容错读取 | 一次写完，版本漂移无感 | 失去编译期类型检查              |
+
+**决策：** 用 `serde_json::Value` + 按 `type` 字符串分支。
+
+**理由：**
+- 解析失败不应阻塞整个收集过程；强类型 struct 一旦上游加字段就反序列化失败
+- 我们只关心一小部分字段（user prompt、assistant text、tool_use 名+参数），其他全丢
+- 单行/单文件失败 `warn!` 后 `continue`，整体仍能产出可用 Summary
+- 当 Codex 或 Claude Code 升级 schema 时，多半不需要改我们的代码
+
+**实现约束（强制）：**
+- 任何 `Value::get(...)` 缺失时走默认值，不 unwrap
+- 未知 `type` 静默跳过，不报错
+- 单行 JSON 解析失败 → `warn!` + continue
+- 详细字段表 + 版本兼容矩阵见 [JSONL.md](./JSONL.md)
+
+---
+
 ## 路线图（未来决策）
 
 以下条目尚未做正式决策，待 v0.2.0+ 评估：

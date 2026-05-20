@@ -77,30 +77,55 @@
 
 **目标：** 实现 `logs.rs`，能从本机日志生成 `Summary`。
 
+> **必读**：实现前先读完 [JSONL.md](./JSONL.md) —— 它是 schema 与字段的唯一事实源。
+> 解析策略遵循 [DECISIONS.md ADR-011](./DECISIONS.md#adr-011jsonl-解析使用-serde_jsonvalue-而非强类型-struct)：全部用 `serde_json::Value` 容错解析。
+
 **任务：**
 
 1. 实现 `logs::collect_messages` 本机分支：
-   - 扫描 `claude_path` 和 `codex_path`
-   - 按修改时间筛选
-   - 兼容 history.jsonl 和 session JSONL 两种格式
-2. 实现 token 压缩规则（详见 [SPEC.md#core-algorithm](./SPEC.md#3-核心算法token-压缩策略)）：
-   - User prompt：全文保留
-   - AI text：首尾各 200 字符
-   - Tool use：name + 一个关键参数（≤60 字符）
-   - Tool result：丢弃
-   - Thinking：丢弃
+   - 扫描 `claude_path` 和 `codex_path`（默认 `~/.claude`、`~/.codex`，可被 workspace 覆盖；用 `expand_tilde`）
+   - 按文件 mtime 过滤到 since 之后
+   - 三个数据源各自有 reader（不要混在一个函数里）：
+     - `~/.claude/history.jsonl`（用户 prompt 历史）
+     - `~/.claude/projects/<encoded>/*.jsonl`（完整 session）
+     - `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`（完整 session）
+   - 单行 JSON 解析失败 `warn!` + continue；单文件失败 `warn!` + continue
+2. 实现 token 压缩规则（[SPEC.md#3](./SPEC.md#3-核心算法token-压缩策略) + [JSONL.md#8](./JSONL.md#8-token-压缩规则汇总与-spec3-对齐)）：
+   - 真实用户 prompt：全文保留
+   - AI text / Codex `output_text`：首尾各 N 字符（默认 N=200）
+   - Tool use / Codex `function_call`：`[name: 关键参数(≤60)]`；Codex `arguments` 需二次 JSON 解析
+   - Tool result / `function_call_output`：丢弃
+   - Thinking / Reasoning：丢弃
+   - Claude `summary` / `git-commit` / `isMeta`：丢弃
+   - Codex `session_meta` / `event_msg` / `compacted` / `turn_context`：丢弃
+   - **关键**：Claude `type:"user"` + `toolUseResult`/数组 content 视为 tool result 丢弃
    - 连续相似指令去重（前 30 字符匹配）
-3. 实现 `infer_project()`：
-   - Claude Code：从 `projects/<encoded>/...` 路径还原项目名
-   - Codex：用文件名 stem
-4. 实现 `aggregate()`：把消息分组成 `Summary`
+3. 实现 `infer_project()`（[JSONL.md#7](./JSONL.md#7-项目名推断-infer_project)）：
+   - Claude session JSONL：优先取任一行 `cwd` 末段
+   - Claude history.jsonl：取 `project` 字段末段
+   - Codex rollout JSONL：取 `session_meta.payload.cwd` 末段
+   - 退路：文件名 stem / "Claude Code" / "Codex"
+4. 实现 `aggregate()`：把消息分组成 `Summary`（`by_project` / `ai_snippets` / `stats`）
+
+**fixture 测试**（每个数据源至少一个 fixture）：
+
+- `tests/fixtures/claude_history.jsonl` —— 含 1 行真实 prompt + 1 行 number 时间戳
+- `tests/fixtures/claude_session_string.jsonl` —— `type:"user"` 字符串 content
+- `tests/fixtures/claude_session_array.jsonl` —— assistant 含 text/thinking/tool_use 数组
+- `tests/fixtures/claude_session_tool_result.jsonl` —— `type:"user"` + `toolUseResult`（应被丢弃）
+- `tests/fixtures/codex_rollout.jsonl` —— `session_meta` + `response_item(message)` + `function_call`
 
 **验证：**
 
-- [ ] 写单元测试：给定一个 fixture JSONL，输出符合预期的 `Summary`
+- [ ] fixture 测试：每种 schema 输出符合预期的 `Summary`
+- [ ] Claude `type:"user"` + `toolUseResult` 的行不出现在用户指令列表中
+- [ ] Codex `function_call.arguments` 内嵌 JSON 串能解析出关键参数
+- [ ] 损坏 JSON 行不阻塞整文件
 - [ ] 在真实 `~/.claude/history.jsonl` 上运行不崩溃
+- [ ] `by_project` 的 key 是真实 cwd 末段（不是 encoded 路径）
 - [ ] 输出可读字符串总长度 < 100k 字符（实际工作 7 天）
 - [ ] `cargo test` 通过
+- [ ] [JSONL.md#10 验证清单](./JSONL.md#10-验证清单) 全部勾选
 
 **提交：** `feat: log parsing and token compression`
 

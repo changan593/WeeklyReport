@@ -1,0 +1,9 @@
+{"timestamp":"2026-05-17T09:00:00Z","type":"session_meta","payload":{"id":"thread-uuid","timestamp":"2026-05-17T09:00:00Z","cwd":"/Users/me/weekly-report","originator":"codex","cli_version":"0.50.0","source":"cli","model_provider":"openai","git":{"branch":"main","commit_hash":"abc123"}}}
+{"timestamp":"2026-05-17T09:00:10Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"重构这个模块"}]}}
+{"timestamp":"2026-05-17T09:00:15Z","type":"response_item","payload":{"type":"reasoning","summary":[{"text":"我先看一下结构"}],"encrypted_content":"..."}}
+{"timestamp":"2026-05-17T09:00:20Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"好的，我会先扫描目录结构，找出待重构的关键文件。"}]}}
+{"timestamp":"2026-05-17T09:00:25Z","type":"response_item","payload":{"type":"function_call","name":"shell","call_id":"call_01","arguments":"{\"command\":[\"ls\",\"-la\"]}"}}
+{"timestamp":"2026-05-17T09:00:30Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_01","output":"total 24\ndrwxr-xr-x ..."}}
+{"timestamp":"2026-05-17T09:01:00Z","type":"event_msg","payload":{"type":"agent_message","message":"思考中..."}}
+{"timestamp":"2026-05-17T09:02:00Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"加测试"}]}}
+{"timestamp":"2026-05-17T09:02:30Z","type":"turn_context","payload":{"trace_id":"trace-001"}}
