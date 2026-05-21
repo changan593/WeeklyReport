@@ -7,21 +7,38 @@
 
 ## [Unreleased]
 
-待 v0.1.0 发布前的内容暂归档于此。
-
-### Added
-- 真实图标资源（替换占位 PNG，使用 `cargo tauri icon` 生成）
-- GitHub Actions CI（三平台并行构建 + tag 触发发布）
-
-### Changed
-- **SSH 远端日志同步从 rsync 改为 `ssh + tar` 单向流**（ADR-013）。Windows 用户
-  开箱即用，不再需要单独装 rsync；本地 tar 在 Windows 上优先用 System32 自带
-  bsdtar，避开 MSYS2 rsync ↔ Win32 OpenSSH 的 Cygwin/Win32 pipe 不兼容问题。
-  代价：全量同步取代增量，但 jsonl 日志体量小可忽略。
+无。
 
 ---
 
-## [0.1.0] - 待发布
+## [0.1.1] - 2026-05-21
+
+发布后第一个修复版，针对 Windows 用户三个开箱即坏的问题，加上 SSH 工作区文档增补。
+
+### Fixed
+- **Windows 生成周报弹出黑色控制台窗口**：Tauri 是 GUI 应用，spawn `ssh.exe` / `tar.exe`
+  时缺 `CREATE_NO_WINDOW` 标志，Windows 默认会弹控制台（即使已重定向 stdio）。
+  新增 `hide_console` helper，apply 到 `build_ssh_command` / `local_tar_command` /
+  `ensure_sshpass_installed` 所有子进程入口；非 Windows 平台 no-op。
+- **Modal 弹窗"拖选关闭"误触**：在 input 内开始拖选文本，鼠标松开点落到 backdrop
+  上时，浏览器把 backdrop 当作 click target 触发 `onClose()`，弹窗被误关。
+  改用 `onMouseDown` + `onMouseUp` 双重判断 + `useRef` 跨事件传递标记，
+  只有"按下和松开都在 backdrop"才关闭。
+- **SSH key 字段填公钥 `.pub` 导致认证失败**：ssh 报 `invalid format` + `Permission
+  denied`。前端字段 hint 由 "留空使用系统默认 ~/.ssh/id_rsa" 改为明确点出
+  "填私钥路径（不是 .pub 公钥）；留空使用系统默认 ~/.ssh/id_ed25519"。
+
+### Added
+- `docs/SSH.md`：SSH 工作区配置完整指南，覆盖 Windows / macOS / Linux 三平台。
+  - 公钥免密：`ssh-keygen` 命令、`ssh-copy-id` (Unix) vs PowerShell scp+ssh 两步法
+  - 密码认证：sshpass 安装、Windows 不推荐的原因
+  - 应用内字段对照表
+  - 7 条常见问题（含 §6 Q1.5 专门解释 `Load key "...pub": invalid format`）
+- README 与 CLAUDE.md 文档目录加链接到 `docs/SSH.md`。
+
+---
+
+## [0.1.0] - 2026-05-20
 
 首个公开版本，覆盖完整端到端流程：日志收集 → 压缩聚合 → LLM 生成 → 本地存档 → 定时邮件。
 
