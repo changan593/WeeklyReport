@@ -14,10 +14,12 @@
 
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Duration, Local};
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap};
 use std::fs::Metadata;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
+use uuid::Uuid;
 
 use crate::workspace::{expand_tilde, Workspace, WorkspaceKind};
 
@@ -72,17 +74,37 @@ pub struct Message {
     pub server: String,
 }
 
-/// 聚合后的工作摘要，喂给 LLM 用。
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// 用户指令的最小单元（aggregate 后送往前端编辑 / 持久化为 draft / 喂给 prompt）。
+///
+/// 来源：
+/// - `source = "claude-code"` / `"codex"`：从 JSONL 解析
+/// - `source = "manual"` 且 `manual = true`：用户在编辑步骤里手动新增的
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LogItem {
+    /// 前端识别用，不持久化语义；后端只读不写
+    pub id: String,
+    /// ISO 8601 时间戳；少数日志可能无 ts → None
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<String>,
+    pub text: String,
+    /// `"claude-code"` / `"codex"` / `"manual"`
+    pub source: String,
+    /// 用户手动新增的（不来自日志）
+    #[serde(default)]
+    pub manual: bool,
+}
+
+/// 聚合后的工作摘要，喂给 LLM 用，也是前端 review 步骤的中间数据。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Summary {
-    /// 项目名 → 用户指令列表（已按时序排序、相邻去重）
-    pub by_project: HashMap<String, Vec<String>>,
+    /// 项目名 → 工作指令条目列表（已按时序排序、相邻去重）
+    pub by_project: HashMap<String, Vec<LogItem>>,
     /// 少量助手回复片段（≤ 10 条），用于让 LLM 把握风格
     pub ai_snippets: Vec<String>,
     pub stats: SummaryStats,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SummaryStats {
     pub total_prompts: u32,
     pub active_days: u32,
@@ -225,7 +247,7 @@ pub fn aggregate(messages: Vec<Message>) -> Summary {
 pub fn aggregate_with_stats(mut messages: Vec<Message>, parse_stats: ParseStats) -> Summary {
     messages.sort_by_key(|m| (m.ts, m.project.clone()));
 
-    let mut by_project: HashMap<String, Vec<String>> = HashMap::new();
+    let mut by_project: HashMap<String, Vec<LogItem>> = HashMap::new();
     let mut servers: BTreeSet<String> = BTreeSet::new();
     let mut tools: BTreeSet<String> = BTreeSet::new();
     let mut active_days: BTreeSet<String> = BTreeSet::new();
@@ -249,7 +271,14 @@ pub fn aggregate_with_stats(mut messages: Vec<Message>, parse_stats: ParseStats)
                     }
                 }
                 last_text_per_project.insert(m.project.clone(), m.text.clone());
-                by_project.entry(m.project).or_default().push(m.text);
+                let item = LogItem {
+                    id: Uuid::new_v4().to_string(),
+                    timestamp: m.ts.map(|t| t.to_rfc3339()),
+                    source: m.tool.as_str().to_string(),
+                    text: m.text,
+                    manual: false,
+                };
+                by_project.entry(m.project).or_default().push(item);
                 total_prompts += 1;
             }
             Role::Assistant => {

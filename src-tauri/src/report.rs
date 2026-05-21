@@ -11,7 +11,7 @@ use chrono::Local;
 use serde::{Deserialize, Serialize};
 
 use crate::llm::{self, LlmProvider};
-use crate::logs::{self, ParseStats, Summary};
+use crate::logs::{self, LogItem, ParseStats, Summary};
 use crate::state;
 use crate::store;
 use crate::workspace::Workspace;
@@ -71,87 +71,16 @@ pub async fn generate(
     Ok((r.text, r.tokens_used, r.duration_ms))
 }
 
-/// 完整生成流程：解析 provider → 收日志 → 聚合 → 注入历史 → 调 LLM → 存档。
-///
-/// 被 Tauri 的 `generate_report` command 与 `scheduler::execute_schedule`
-/// 共同调用，避免两边重复实现。
-pub async fn run_generation(
-    workspace_ids: &[String],
-    template_id: &str,
-    days: u32,
-    provider_id: Option<&str>,
-) -> Result<GenerationOutput> {
-    // 1. 模板
-    let template = state::list_templates()?
-        .into_iter()
-        .find(|t| t.id == template_id)
-        .ok_or_else(|| {
-            anyhow!(i18n::t_var(
-                "err.report.template_not_found",
-                &[("id", template_id)]
-            ))
-        })?;
-
-    // 2. 解析 provider（按 LLM.md §6 优先级 显式 > 模板 > 默认 > 第一个）
-    let provider = resolve_provider(provider_id, template.provider_id.as_deref())?;
-
-    // 3. 工作区
-    let all_ws = state::list_workspaces()?;
-    let workspaces: Vec<Workspace> = all_ws
-        .into_iter()
-        .filter(|w| workspace_ids.iter().any(|id| id == &w.id))
-        .collect();
-    if workspaces.is_empty() {
-        bail!("未选中任何工作区");
-    }
-
-    // 4. 设置
-    let settings = state::get_settings()?;
-    let clip = settings.prompt_clip_chars as usize;
-
-    // 5. 收集 messages（单 workspace 失败不阻塞其他）
-    let mut messages = Vec::new();
-    let mut parse_stats = ParseStats::default();
-    for ws in &workspaces {
-        match logs::collect_messages(ws, days, clip).await {
-            Ok((part, s)) => {
-                messages.extend(part);
-                parse_stats.merge(&s);
-            }
-            Err(e) => tracing::warn!("workspace {} 收集日志失败: {:#}", ws.name, e),
-        }
-    }
-
-    // 6. 聚合
-    let summary = logs::aggregate_with_stats(messages, parse_stats);
-
-    // 7. 历史报告作为风格参考
-    let past = load_past_reports(settings.past_reports_context as usize)?;
-
-    // 8. 生成
-    let (markdown, tokens, duration_ms) = generate(&summary, &template, &past, &provider).await?;
-
-    // 9. 存档
-    let record = ReportRecord {
-        id: String::new(),
-        week: format!("最近 {days} 天"),
-        template_id: template.id.clone(),
-        template_name: template.name.clone(),
-        provider_id: Some(provider.id.clone()),
-        provider_name: Some(provider.name.clone()),
-        tokens_used: tokens,
-        project_count: summary.stats.project_count,
-        generated_at: Local::now().to_rfc3339(),
-    };
-    let saved = state::save_report(record, &markdown)?;
-
-    Ok(GenerationOutput {
-        record: saved,
-        content: markdown,
-        duration_ms,
-        skipped_lines: summary.stats.skipped_lines,
-        skipped_files: summary.stats.skipped_files,
-    })
+/// 第一步「收集」的输出。送往前端的 review 步骤，让用户编辑 `summary`。
+/// 也可序列化保存为 draft，供下次继续编辑。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CollectionOutput {
+    pub summary: Summary,
+    /// 这次收集是基于哪些 workspace，让 draft 恢复时能匹配
+    pub workspace_ids: Vec<String>,
+    pub days: u32,
+    pub skipped_lines: u32,
+    pub skipped_files: u32,
 }
 
 /// 完整生成流程的输出。`skipped_*` 是解析阶段计数，用于让 UI 提示用户
@@ -163,6 +92,117 @@ pub struct GenerationOutput {
     pub duration_ms: u64,
     pub skipped_lines: u32,
     pub skipped_files: u32,
+}
+
+/// 第一步：扫日志 → 聚合 → 返回带 timestamp 的 `Summary`。
+/// 不调 LLM、不存档，可被前端编辑。
+pub async fn collect_summary(workspace_ids: &[String], days: u32) -> Result<CollectionOutput> {
+    let all_ws = state::list_workspaces()?;
+    let workspaces: Vec<Workspace> = all_ws
+        .into_iter()
+        .filter(|w| workspace_ids.iter().any(|id| id == &w.id))
+        .collect();
+    if workspaces.is_empty() {
+        bail!(i18n::t("err.report.no_workspaces"));
+    }
+
+    let settings = state::get_settings()?;
+    let clip = settings.prompt_clip_chars as usize;
+
+    let mut messages = Vec::new();
+    let mut parse_stats = ParseStats::default();
+    for ws in &workspaces {
+        match logs::collect_messages(ws, days, clip).await {
+            Ok((part, s)) => {
+                messages.extend(part);
+                parse_stats.merge(&s);
+            }
+            Err(e) => tracing::warn!("workspace {} 收集日志失败: {:#}", ws.name, e),
+        }
+    }
+    let summary = logs::aggregate_with_stats(messages, parse_stats);
+    Ok(CollectionOutput {
+        skipped_lines: summary.stats.skipped_lines,
+        skipped_files: summary.stats.skipped_files,
+        summary,
+        workspace_ids: workspace_ids.to_vec(),
+        days,
+    })
+}
+
+/// 第二步：用（可能已被用户编辑过的）`Summary` 渲染 prompt → 调 LLM → 存档。
+pub async fn render_from_summary(
+    summary: &Summary,
+    template_id: &str,
+    days: u32,
+    provider_id: Option<&str>,
+) -> Result<GenerationOutput> {
+    let template = state::list_templates()?
+        .into_iter()
+        .find(|t| t.id == template_id)
+        .ok_or_else(|| {
+            anyhow!(i18n::t_var(
+                "err.report.template_not_found",
+                &[("id", template_id)]
+            ))
+        })?;
+    let provider = resolve_provider(provider_id, template.provider_id.as_deref())?;
+    let settings = state::get_settings()?;
+    let past = load_past_reports(settings.past_reports_context as usize)?;
+
+    // 重新统计：用户可能在编辑步骤里增删条目，原 stats 会失真
+    let (total_prompts, project_count, main_project) = recompute_stats(summary);
+    let mut summary_for_prompt = summary.clone();
+    summary_for_prompt.stats.total_prompts = total_prompts;
+    summary_for_prompt.stats.project_count = project_count;
+    summary_for_prompt.stats.main_project = main_project;
+
+    let (markdown, tokens, duration_ms) =
+        generate(&summary_for_prompt, &template, &past, &provider).await?;
+
+    let record = ReportRecord {
+        id: String::new(),
+        week: format!("最近 {days} 天"),
+        template_id: template.id.clone(),
+        template_name: template.name.clone(),
+        provider_id: Some(provider.id.clone()),
+        provider_name: Some(provider.name.clone()),
+        tokens_used: tokens,
+        project_count: summary_for_prompt.stats.project_count,
+        generated_at: Local::now().to_rfc3339(),
+    };
+    let saved = state::save_report(record, &markdown)?;
+
+    Ok(GenerationOutput {
+        record: saved,
+        content: markdown,
+        duration_ms,
+        skipped_lines: summary_for_prompt.stats.skipped_lines,
+        skipped_files: summary_for_prompt.stats.skipped_files,
+    })
+}
+
+/// 编辑后用户可能删/增条目，按当前 by_project 重算 prompt 数 / 项目数 / 主项目。
+fn recompute_stats(summary: &Summary) -> (u32, u32, Option<String>) {
+    let total: u32 = summary.by_project.values().map(|v| v.len() as u32).sum();
+    let count = summary.by_project.len() as u32;
+    let main = summary
+        .by_project
+        .iter()
+        .max_by_key(|(_, v)| v.len())
+        .map(|(k, _)| k.clone());
+    (total, count, main)
+}
+
+/// 一站式：收集 → 直接渲染（向后兼容旧 `generate_report` 命令 + scheduler 调用）。
+pub async fn run_generation(
+    workspace_ids: &[String],
+    template_id: &str,
+    days: u32,
+    provider_id: Option<&str>,
+) -> Result<GenerationOutput> {
+    let collected = collect_summary(workspace_ids, days).await?;
+    render_from_summary(&collected.summary, template_id, days, provider_id).await
 }
 
 /// 按 LLM.md §6 优先级解析 provider：显式 > 模板 > 默认 > 第一个 > 报错。
@@ -239,15 +279,16 @@ pub fn build_prompt(summary: &Summary, template: &Template, past_reports: &[Stri
     // 用户工作指令分组（按指令数从多到少排序，便于 LLM 优先处理重点项目）
     out.push_str("以下是从日志提取的用户工作指令（按项目分组）：\n");
     out.push_str("<work_logs>\n");
-    let mut projects: Vec<(&String, &Vec<String>)> = summary.by_project.iter().collect();
+    let mut projects: Vec<(&String, &Vec<crate::logs::LogItem>)> =
+        summary.by_project.iter().collect();
     projects.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then(a.0.cmp(b.0)));
     if projects.is_empty() {
-        out.push_str("（本期未提取到任何用户指令）\n");
+        out.push_str("(本期未提取到任何用户指令)\n");
     } else {
-        for (project, prompts) in projects {
-            out.push_str(&format!("【{}】({} 条指令)\n", project, prompts.len()));
-            for p in prompts {
-                let line = p.replace('\n', " ");
+        for (project, items) in projects {
+            out.push_str(&format!("【{}】({} 条指令)\n", project, items.len()));
+            for item in items {
+                let line = item.text.replace('\n', " ");
                 out.push_str(&format!("  · {line}\n"));
             }
             out.push('\n');
@@ -314,18 +355,28 @@ mod tests {
     use crate::logs::SummaryStats;
     use std::collections::HashMap;
 
+    fn fake_item(text: &str) -> LogItem {
+        LogItem {
+            id: "test-id".into(),
+            timestamp: Some("2026-05-17T10:00:00+08:00".into()),
+            source: "claude-code".into(),
+            text: text.into(),
+            manual: false,
+        }
+    }
+
     fn sample_summary() -> Summary {
         let mut by_project = HashMap::new();
         by_project.insert(
             "weekly-report".to_string(),
             vec![
-                "实现 LLM provider 抽象".to_string(),
-                "把 SQLite 换成 JSON 文件".to_string(),
+                fake_item("实现 LLM provider 抽象"),
+                fake_item("把 SQLite 换成 JSON 文件"),
             ],
         );
         by_project.insert(
             "chat-bot".to_string(),
-            vec!["调试 stream API 的中断问题".to_string()],
+            vec![fake_item("调试 stream API 的中断问题")],
         );
         Summary {
             by_project,
@@ -470,7 +521,7 @@ mod tests {
     fn prompt_replaces_newlines_in_user_prompts() {
         let mut s = sample_summary();
         s.by_project
-            .insert("multi".into(), vec!["第一行\n第二行".to_string()]);
+            .insert("multi".into(), vec![fake_item("第一行\n第二行")]);
         let p = build_prompt(&s, &tech_template(), &[]);
         // 行内换行被替换为空格，避免 prompt 结构被破坏
         assert!(p.contains("第一行 第二行"));
