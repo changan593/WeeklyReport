@@ -1,7 +1,8 @@
 // 设置页（详见 docs/UI.md#46-设置页-settingsjsx）。
 //
-// Section 1 SMTP：预设按钮 + 表单 + 测试连接 / 发测试邮件 / 保存
-// Section 2 数据存储：显示数据目录路径，提醒用户可备份 / 迁移
+// Section 1 语言：切换 UI 中英
+// Section 2 SMTP：预设按钮 + 表单 + 测试连接 / 发测试邮件 / 保存
+// Section 3 数据存储：显示数据目录路径，提醒用户可备份 / 迁移
 
 import { useEffect, useState } from 'react';
 import {
@@ -30,42 +31,13 @@ const LANG_OPTIONS = [
   { value: 'en', i18nKey: 'settings.language.en' },
 ];
 
+// SMTP 预设：label 是品牌名（不翻译），hint 走 i18n key 运行时取
 const SMTP_PRESETS = [
-  {
-    label: 'Gmail',
-    host: 'smtp.gmail.com',
-    port: 465,
-    use_ssl: true,
-    hint: 'Gmail 需要开启两步验证并使用「应用专用密码」（App Password），不能用账户密码。',
-  },
-  {
-    label: 'Outlook 365',
-    host: 'smtp.office365.com',
-    port: 587,
-    use_ssl: false,
-    hint: 'Microsoft 账号需在管理后台开启 SMTP AUTH，部分企业账号默认禁用。',
-  },
-  {
-    label: 'QQ 邮箱',
-    host: 'smtp.qq.com',
-    port: 465,
-    use_ssl: true,
-    hint: '密码字段填「授权码」（在 QQ 邮箱设置 → 账户里生成），不是登录密码。',
-  },
-  {
-    label: '163 邮箱',
-    host: 'smtp.163.com',
-    port: 465,
-    use_ssl: true,
-    hint: '密码字段填「客户端授权密码」（在网易邮箱设置里生成），不是登录密码。',
-  },
-  {
-    label: '企业微信邮箱',
-    host: 'smtp.exmail.qq.com',
-    port: 465,
-    use_ssl: true,
-    hint: '使用企业邮箱的登录密码或专用授权码（部分企业要求开启 IMAP/SMTP 服务）。',
-  },
+  { label: 'Gmail',          host: 'smtp.gmail.com',     port: 465, use_ssl: true,  hintKey: 'settings.smtp.preset.gmail.hint' },
+  { label: 'Outlook 365',    host: 'smtp.office365.com', port: 587, use_ssl: false, hintKey: 'settings.smtp.preset.outlook.hint' },
+  { label: 'QQ 邮箱',         host: 'smtp.qq.com',        port: 465, use_ssl: true,  hintKey: 'settings.smtp.preset.qq.hint' },
+  { label: '163 邮箱',        host: 'smtp.163.com',       port: 465, use_ssl: true,  hintKey: 'settings.smtp.preset.n163.hint' },
+  { label: '企业微信邮箱',     host: 'smtp.exmail.qq.com', port: 465, use_ssl: true,  hintKey: 'settings.smtp.preset.wecom.hint' },
 ];
 
 const EMPTY = {
@@ -124,7 +96,7 @@ export default function Settings() {
       port: preset.port,
       use_ssl: preset.use_ssl,
     }));
-    setPresetHint(preset.hint);
+    setPresetHint(t(preset.hintKey));
     setStatus(null);
   }
 
@@ -137,7 +109,7 @@ export default function Settings() {
 
   async function handleTest() {
     setBusy('test');
-    setStatus({ type: 'info', msg: '正在测试 SMTP 连接…' });
+    setStatus({ type: 'info', msg: t('settings.smtp.status.test_running') });
     try {
       const msg = await testSmtpConfig(normalize());
       setStatus({ type: 'success', msg });
@@ -150,11 +122,11 @@ export default function Settings() {
 
   async function handleSendTest() {
     if (!testEmail.trim()) {
-      setStatus({ type: 'error', msg: '请填收件人邮箱' });
+      setStatus({ type: 'error', msg: t('settings.smtp.status.recipient_required') });
       return;
     }
     setBusy('send');
-    setStatus({ type: 'info', msg: '正在发送测试邮件…' });
+    setStatus({ type: 'info', msg: t('settings.smtp.status.sending') });
     try {
       const msg = await sendTestEmail(normalize(), testEmail.trim());
       setStatus({ type: 'success', msg });
@@ -169,7 +141,7 @@ export default function Settings() {
     setBusy('save');
     try {
       await saveSmtpConfig(normalize());
-      setStatus({ type: 'success', msg: '已保存 SMTP 配置' });
+      setStatus({ type: 'success', msg: t('settings.smtp.status.saved') });
       setTimeout(() => setStatus(null), 2500);
     } catch (e) {
       setStatus({ type: 'error', msg: formatError(e) });
@@ -210,7 +182,9 @@ export default function Settings() {
       <Section title={t('settings.sections.smtp')}>
         {/* 预设按钮 */}
         <div className="mb-3">
-          <div className="mb-1.5 text-[11.5px] font-medium text-stone-600">快速预设</div>
+          <div className="mb-1.5 text-[11.5px] font-medium text-stone-600">
+            {t('settings.smtp.preset_label')}
+          </div>
           <div className="flex flex-wrap gap-1.5">
             {SMTP_PRESETS.map((p, i) => (
               <button
@@ -231,10 +205,10 @@ export default function Settings() {
         </div>
 
         <div className="grid grid-cols-2 gap-3">
-          <FormField label="SMTP Host">
+          <FormField label={t('settings.smtp.host')}>
             <Input value={cfg.host} onChange={(v) => set('host', v)} placeholder="smtp.example.com" />
           </FormField>
-          <FormField label="Port">
+          <FormField label={t('settings.smtp.port')}>
             <Input
               value={String(cfg.port)}
               onChange={(v) => set('port', v)}
@@ -243,7 +217,7 @@ export default function Settings() {
           </FormField>
         </div>
 
-        <FormField label="加密方式" className="mt-3">
+        <FormField label={t('settings.smtp.encryption')} className="mt-3">
           <div className="inline-flex rounded-md border border-stone-200 p-0.5">
             {[
               { v: false, label: 'STARTTLS' },
@@ -266,14 +240,14 @@ export default function Settings() {
         </FormField>
 
         <div className="mt-3 grid grid-cols-2 gap-3">
-          <FormField label="用户名（邮箱）">
+          <FormField label={t('settings.smtp.username')}>
             <Input
               value={cfg.username}
               onChange={(v) => set('username', v)}
               placeholder="you@example.com"
             />
           </FormField>
-          <FormField label="密码 / 授权码">
+          <FormField label={t('settings.smtp.password')}>
             <Input
               type="password"
               value={cfg.password}
@@ -282,11 +256,11 @@ export default function Settings() {
           </FormField>
         </div>
 
-        <FormField label="发件人显示名" className="mt-3">
+        <FormField label={t('settings.smtp.from_name')} className="mt-3">
           <Input
             value={cfg.from_name}
             onChange={(v) => set('from_name', v)}
-            placeholder="（可选）WeeklyReport 周报助手"
+            placeholder={t('settings.smtp.from_name_placeholder')}
           />
         </FormField>
 
@@ -298,19 +272,19 @@ export default function Settings() {
           <Input
             value={testEmail}
             onChange={setTestEmail}
-            placeholder="测试收件邮箱（可与用户名相同）"
+            placeholder={t('settings.smtp.test_email_placeholder')}
             className="flex-1 min-w-[200px]"
           />
           <SecondaryButton onClick={handleSendTest} disabled={busy !== null}>
             <Icon name="mail" size={14} />
-            {busy === 'send' ? '发送中…' : '发测试邮件'}
+            {busy === 'send' ? t('settings.smtp.sending') : t('settings.smtp.send_test')}
           </SecondaryButton>
           <SecondaryButton onClick={handleTest} disabled={busy !== null}>
             <Icon name="refresh" size={14} />
-            {busy === 'test' ? '测试中…' : '测连接'}
+            {busy === 'test' ? t('settings.smtp.testing') : t('settings.smtp.test_conn')}
           </SecondaryButton>
           <PrimaryButton onClick={handleSave} disabled={busy !== null}>
-            {busy === 'save' ? '保存中…' : '保存'}
+            {busy === 'save' ? t('common.saving') : t('common.save')}
           </PrimaryButton>
         </div>
       </Section>
