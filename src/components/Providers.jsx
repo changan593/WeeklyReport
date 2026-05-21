@@ -13,6 +13,7 @@ import {
   useAsyncState,
   formatError,
 } from '../api.js';
+import { useTranslation } from '../i18n/index.js';
 import {
   EmptyState,
   FormField,
@@ -31,13 +32,14 @@ import {
   StatusBanner,
 } from './ui.jsx';
 
-const KIND_LABELS = {
-  OpenAiCompatible: 'OpenAI 兼容',
-  Anthropic: 'Anthropic',
-  Gemini: 'Gemini',
+const KIND_I18N_KEYS = {
+  OpenAiCompatible: 'providers.kind.openai',
+  Anthropic: 'providers.kind.anthropic',
+  Gemini: 'providers.kind.gemini',
 };
 
 export default function Providers() {
+  const { t } = useTranslation();
   const [items, loading, reload] = useAsyncState(listProviders, []);
   const [presets, setPresets] = useState([]);
   const [editing, setEditing] = useState(null);
@@ -49,7 +51,7 @@ export default function Providers() {
   }, []);
 
   async function handleDelete(p) {
-    if (!confirm(`删除 LLM 源「${p.name}」？`)) return;
+    if (!confirm(t('providers.confirm_delete', { name: p.name }))) return;
     try {
       await deleteProvider(p.id);
       reload();
@@ -71,19 +73,17 @@ export default function Providers() {
     <div>
       <header className="mb-6 flex items-end justify-between">
         <div>
-          <h1 className="text-2xl font-medium text-stone-900">LLM 源</h1>
-          <p className="mt-1 text-[13px] text-stone-500">
-            配置一个或多个 LLM API，用于生成周报
-          </p>
+          <h1 className="text-2xl font-medium text-stone-900">{t('providers.title')}</h1>
+          <p className="mt-1 text-[13px] text-stone-500">{t('providers.subtitle')}</p>
         </div>
         <PrimaryButton onClick={() => setEditing(emptyProvider())}>
-          <Icon name="plus" size={15} /> 添加 LLM 源
+          <Icon name="plus" size={15} /> {t('providers.add')}
         </PrimaryButton>
       </header>
 
       {loading && <LoadingState />}
       {!loading && items && items.length === 0 && (
-        <EmptyState iconName="llm" message="还没有 LLM 源">
+        <EmptyState iconName="llm" message={t('providers.empty')}>
           <div className="flex flex-wrap justify-center gap-2 px-4">
             {presets.slice(0, 6).map((p, i) => (
               <button
@@ -128,6 +128,7 @@ export default function Providers() {
 }
 
 function ProviderCard({ provider, onEdit, onDelete, onSetDefault }) {
+  const { t } = useTranslation();
   return (
     <div className="flex items-start gap-3 rounded-lg border border-stone-200 bg-white p-5 hover:border-stone-300">
       <div className="mt-0.5 flex h-9 w-9 items-center justify-center rounded-lg bg-stone-100 text-stone-500">
@@ -138,11 +139,11 @@ function ProviderCard({ provider, onEdit, onDelete, onSetDefault }) {
           <span className="text-[14px] font-medium text-stone-900">{provider.name}</span>
           {provider.is_default && (
             <span className="inline-flex items-center gap-1 rounded bg-amber-50 px-1.5 py-0.5 text-[11px] text-amber-700">
-              <Icon name="star" size={11} /> 默认
+              <Icon name="star" size={11} /> {t('providers.card.default_badge')}
             </span>
           )}
           <span className="rounded bg-stone-100 px-1.5 py-0.5 text-[11px] text-stone-600">
-            {KIND_LABELS[provider.kind] || provider.kind}
+            {KIND_I18N_KEYS[provider.kind] ? t(KIND_I18N_KEYS[provider.kind]) : provider.kind}
           </span>
         </div>
         <div className="mt-1 truncate font-mono text-[12px] text-stone-500">
@@ -150,7 +151,7 @@ function ProviderCard({ provider, onEdit, onDelete, onSetDefault }) {
         </div>
         <div className="mt-2 flex flex-wrap gap-1.5 text-[11px]">
           <span className="rounded bg-orange-50 px-1.5 py-0.5 font-mono text-orange-700">
-            {provider.model || '（未设置 model）'}
+            {provider.model || t('providers.card.no_model')}
           </span>
           <span className="rounded bg-stone-100 px-1.5 py-0.5 text-stone-600">
             max_tokens: {provider.max_tokens}
@@ -169,14 +170,14 @@ function ProviderCard({ provider, onEdit, onDelete, onSetDefault }) {
             onClick={onSetDefault}
             className="rounded px-2 py-0.5 text-[11.5px] text-stone-500 hover:text-stone-900"
           >
-            设为默认
+            {t('providers.card.set_default')}
           </button>
         )}
         <div className="flex gap-0.5">
-          <IconButton title="编辑" onClick={onEdit}>
+          <IconButton title={t('providers.card.edit')} onClick={onEdit}>
             <Icon name="edit" size={15} />
           </IconButton>
-          <IconButton title="删除" onClick={onDelete}>
+          <IconButton title={t('providers.card.delete')} onClick={onDelete}>
             <Icon name="trash" size={15} />
           </IconButton>
         </div>
@@ -201,6 +202,7 @@ function emptyProvider() {
 }
 
 function ProviderEditor({ initial, presets, onClose, onSaved }) {
+  const { t } = useTranslation();
   const [p, setP] = useState({ ...initial });
   const [status, setStatus] = useState(null);
   const [testing, setTesting] = useState(false);
@@ -222,12 +224,12 @@ function ProviderEditor({ initial, presets, onClose, onSaved }) {
       temperature: preset.temperature,
       api_key: prev.api_key || preset.api_key,
     }));
-    setStatus({ type: 'info', msg: `已应用预设：${preset.name}` });
+    setStatus({ type: 'info', msg: t('providers.editor.preset_applied', { name: preset.name }) });
   }
 
   async function handleTest() {
     setTesting(true);
-    setStatus({ type: 'info', msg: '正在测试连接（最长 120 秒）…' });
+    setStatus({ type: 'info', msg: t('providers.editor.testing') });
     try {
       const payload = normalize(p);
       const msg = await testProvider(payload);
@@ -241,7 +243,7 @@ function ProviderEditor({ initial, presets, onClose, onSaved }) {
 
   async function handleSave() {
     if (!p.name.trim()) {
-      setStatus({ type: 'error', msg: 'LLM 源名称不能为空' });
+      setStatus({ type: 'error', msg: t('providers.editor.name_required') });
       return;
     }
     setSaving(true);
@@ -256,12 +258,17 @@ function ProviderEditor({ initial, presets, onClose, onSaved }) {
 
   return (
     <Modal onClose={onClose} width="max-w-2xl">
-      <ModalHeader title={initial.id ? '编辑 LLM 源' : '添加 LLM 源'} onClose={onClose} />
+      <ModalHeader
+        title={initial.id ? t('providers.editor.title_edit') : t('providers.editor.title_new')}
+        onClose={onClose}
+      />
       <ModalBody className="space-y-4">
         {/* 预设按钮组 */}
         {presets.length > 0 && (
           <div>
-            <div className="mb-1.5 text-[11.5px] font-medium text-stone-600">快速预设</div>
+            <div className="mb-1.5 text-[11.5px] font-medium text-stone-600">
+              {t('providers.editor.preset_label')}
+            </div>
             <div className="flex flex-wrap gap-1.5">
               {presets.map((preset, i) => (
                 <button
@@ -277,32 +284,32 @@ function ProviderEditor({ initial, presets, onClose, onSaved }) {
           </div>
         )}
 
-        <FormField label="名称">
+        <FormField label={t('providers.editor.name')}>
           <Input
             value={p.name}
             onChange={(v) => set('name', v)}
-            placeholder="如：公司 Claude / 个人 DeepSeek"
+            placeholder={t('providers.editor.name_placeholder')}
           />
         </FormField>
 
         <div className="grid grid-cols-2 gap-3">
-          <FormField label="协议类型">
+          <FormField label={t('providers.editor.kind')}>
             <Select value={p.kind} onChange={(v) => set('kind', v)}>
-              <option value="OpenAiCompatible">OpenAI 兼容</option>
-              <option value="Anthropic">Anthropic</option>
-              <option value="Gemini">Gemini</option>
+              <option value="OpenAiCompatible">{t('providers.kind.openai')}</option>
+              <option value="Anthropic">{t('providers.kind.anthropic')}</option>
+              <option value="Gemini">{t('providers.kind.gemini')}</option>
             </Select>
           </FormField>
-          <FormField label="模型 ID">
+          <FormField label={t('providers.editor.model')}>
             <Mono
               value={p.model}
               onChange={(v) => set('model', v)}
-              placeholder="如 gpt-4o-mini / claude-sonnet-4-20250514"
+              placeholder={t('providers.editor.model_placeholder')}
             />
           </FormField>
         </div>
 
-        <FormField label="Base URL">
+        <FormField label={t('providers.editor.base_url')}>
           <Mono
             value={p.base_url}
             onChange={(v) => set('base_url', v)}
@@ -310,7 +317,7 @@ function ProviderEditor({ initial, presets, onClose, onSaved }) {
           />
         </FormField>
 
-        <FormField label="API Key" hint="本地明文保存，存放于 data_dir 的 llm_providers.json">
+        <FormField label={t('providers.editor.api_key')} hint={t('providers.editor.api_key_hint')}>
           <Mono
             value={p.api_key}
             onChange={(v) => set('api_key', v)}
@@ -326,7 +333,7 @@ function ProviderEditor({ initial, presets, onClose, onSaved }) {
               onChange={(v) => set('max_tokens', v)}
             />
           </FormField>
-          <FormField label="temperature" hint="0~1，留空表示不传给 API（Anthropic 通常留空）">
+          <FormField label="temperature" hint={t('providers.editor.temperature_hint')}>
             <Input
               value={p.temperature === null || p.temperature === undefined ? '' : String(p.temperature)}
               onChange={(v) => set('temperature', v)}
@@ -341,7 +348,7 @@ function ProviderEditor({ initial, presets, onClose, onSaved }) {
             checked={!!p.is_default}
             onChange={(e) => set('is_default', e.target.checked)}
           />
-          <span>设为默认 LLM 源</span>
+          <span>{t('providers.editor.set_default')}</span>
         </label>
 
         <StatusBanner status={status} />
@@ -349,14 +356,14 @@ function ProviderEditor({ initial, presets, onClose, onSaved }) {
       <ModalFooter>
         <SecondaryButton onClick={handleTest} disabled={testing}>
           <Icon name="refresh" size={14} />
-          {testing ? '测试中…' : '测试连接'}
+          {testing ? t('providers.editor.test_running') : t('providers.editor.test_btn')}
         </SecondaryButton>
         <div className="flex gap-2">
           <SecondaryButton onClick={onClose} disabled={saving}>
-            取消
+            {t('common.cancel')}
           </SecondaryButton>
           <PrimaryButton onClick={handleSave} disabled={saving}>
-            {saving ? '保存中…' : '保存'}
+            {saving ? t('common.saving') : t('common.save')}
           </PrimaryButton>
         </div>
       </ModalFooter>
