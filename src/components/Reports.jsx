@@ -10,6 +10,7 @@ import {
   useAsyncState,
   formatError,
 } from '../api.js';
+import { useTranslation } from '../i18n/index.js';
 import {
   EmptyState,
   Icon,
@@ -25,24 +26,20 @@ import {
 import { formatIsoMinute as formatTs } from '../utils.js';
 
 export default function Reports() {
+  const { t } = useTranslation();
   const [items, loading, reload] = useAsyncState(listReports, []);
   const [openId, setOpenId] = useState(null);
 
   return (
     <div>
       <header className="mb-6">
-        <h1 className="text-2xl font-medium text-stone-900">历史周报</h1>
-        <p className="mt-1 text-[13px] text-stone-500">
-          所有生成的周报都会本地存档，可作为下次生成的风格参考
-        </p>
+        <h1 className="text-2xl font-medium text-stone-900">{t('reports.title')}</h1>
+        <p className="mt-1 text-[13px] text-stone-500">{t('reports.subtitle')}</p>
       </header>
 
       {loading && <LoadingState />}
       {!loading && items && items.length === 0 && (
-        <EmptyState
-          iconName="report"
-          message="还没有生成过任何周报"
-        />
+        <EmptyState iconName="report" message={t('reports.empty')} />
       )}
       {!loading && items && items.length > 0 && (
         <ReportTable items={sortByDateDesc(items)} onOpen={setOpenId} />
@@ -69,17 +66,18 @@ function sortByDateDesc(items) {
 }
 
 function ReportTable({ items, onOpen }) {
+  const { t } = useTranslation();
   return (
     <div className="overflow-hidden rounded-lg border border-stone-200 bg-white">
       <table className="w-full text-[12.5px]">
         <thead className="border-b border-stone-200 bg-stone-50 text-stone-500">
           <tr>
-            <th className="px-4 py-2 text-left font-medium">时间范围</th>
-            <th className="px-4 py-2 text-left font-medium">模板</th>
-            <th className="px-4 py-2 text-left font-medium">LLM 源</th>
-            <th className="px-4 py-2 text-right font-medium">项目</th>
-            <th className="px-4 py-2 text-right font-medium">Tokens</th>
-            <th className="px-4 py-2 text-left font-medium">生成时间</th>
+            <th className="px-4 py-2 text-left font-medium">{t('reports.columns.range')}</th>
+            <th className="px-4 py-2 text-left font-medium">{t('reports.columns.template')}</th>
+            <th className="px-4 py-2 text-left font-medium">{t('reports.columns.provider')}</th>
+            <th className="px-4 py-2 text-right font-medium">{t('reports.columns.projects')}</th>
+            <th className="px-4 py-2 text-right font-medium">{t('reports.columns.tokens')}</th>
+            <th className="px-4 py-2 text-left font-medium">{t('reports.columns.generated_at')}</th>
             <th className="px-4 py-2 w-8" />
           </tr>
         </thead>
@@ -92,14 +90,10 @@ function ReportTable({ items, onOpen }) {
             >
               <td className="px-4 py-2 text-stone-900">{r.week}</td>
               <td className="px-4 py-2 text-stone-700">{r.template_name}</td>
-              <td className="px-4 py-2 text-stone-500">
-                {r.provider_name || '—'}
-              </td>
+              <td className="px-4 py-2 text-stone-500">{r.provider_name || '—'}</td>
               <td className="px-4 py-2 text-right text-stone-700">{r.project_count}</td>
               <td className="px-4 py-2 text-right text-stone-500">{r.tokens_used}</td>
-              <td className="px-4 py-2 text-stone-500">
-                {formatTs(r.generated_at)}
-              </td>
+              <td className="px-4 py-2 text-stone-500">{formatTs(r.generated_at)}</td>
               <td className="px-4 py-2 text-stone-400">
                 <Icon name="chevronR" size={14} />
               </td>
@@ -114,6 +108,7 @@ function ReportTable({ items, onOpen }) {
 // formatTs 复用 src/utils.js 的 formatIsoMinute（导入在文件顶部）
 
 function ReportDetail({ id, onClose, onDeleted }) {
+  const { t } = useTranslation();
   const [data, loading, , error] = useAsyncState(() => getReport(id), [id]);
   const [copied, setCopied] = useState(false);
 
@@ -123,13 +118,14 @@ function ReportDetail({ id, onClose, onDeleted }) {
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch (e) {
-      alert('复制失败：' + formatError(e));
+      alert(`${t('reports.copy_failed')}: ${formatError(e)}`);
     }
   }
 
   async function handleDelete() {
     if (!data?.record) return;
-    if (!confirm(`删除报告「${data.record.week} - ${data.record.template_name}」？`)) {
+    const name = `${data.record.week} - ${data.record.template_name}`;
+    if (!confirm(t('reports.confirm_delete', { name }))) {
       return;
     }
     try {
@@ -142,7 +138,7 @@ function ReportDetail({ id, onClose, onDeleted }) {
 
   return (
     <Modal onClose={onClose} width="max-w-3xl">
-      <ModalHeader title="周报详情" onClose={onClose} />
+      <ModalHeader title={t('reports.detail.title')} onClose={onClose} />
       <ModalBody className="space-y-3">
         {loading && <LoadingState />}
         {error && (
@@ -154,12 +150,12 @@ function ReportDetail({ id, onClose, onDeleted }) {
           <>
             <div className="flex flex-wrap gap-x-4 gap-y-1 text-[12px] text-stone-500">
               <span>{data.record.week}</span>
-              <span>模板：{data.record.template_name}</span>
+              <span>{t('reports.detail.template', { name: data.record.template_name })}</span>
               {data.record.provider_name && (
-                <span>LLM：{data.record.provider_name}</span>
+                <span>{t('reports.detail.provider', { name: data.record.provider_name })}</span>
               )}
-              <span>项目：{data.record.project_count}</span>
-              <span>Tokens：{data.record.tokens_used}</span>
+              <span>{t('reports.detail.projects', { count: data.record.project_count })}</span>
+              <span>{t('reports.detail.tokens', { count: data.record.tokens_used })}</span>
               <span>{formatTs(data.record.generated_at)}</span>
             </div>
             <pre className="max-h-[60vh] overflow-auto rounded-lg bg-stone-50 p-5 font-mono text-[12px] text-stone-800 whitespace-pre-wrap">
@@ -170,14 +166,14 @@ function ReportDetail({ id, onClose, onDeleted }) {
       </ModalBody>
       <ModalFooter>
         <SecondaryButton onClick={handleDelete}>
-          <Icon name="trash" size={14} /> 删除
+          <Icon name="trash" size={14} /> {t('common.delete')}
         </SecondaryButton>
         <div className="flex gap-2">
           <SecondaryButton onClick={handleCopy} disabled={!data?.content}>
             <Icon name="copy" size={14} />
-            {copied ? '已复制' : '复制 Markdown'}
+            {copied ? t('common.copied') : t('reports.actions.copy_markdown')}
           </SecondaryButton>
-          <PrimaryButton onClick={onClose}>关闭</PrimaryButton>
+          <PrimaryButton onClick={onClose}>{t('common.close')}</PrimaryButton>
         </div>
       </ModalFooter>
     </Modal>
