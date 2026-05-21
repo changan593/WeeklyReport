@@ -204,6 +204,46 @@ fn backup_broken(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// 草稿摘要文件名（生成对话框 review 步骤的中间状态）。
+const DRAFT_SUMMARY_FILE: &str = "draft_summary.json";
+
+/// 保存草稿摘要（generate dialog review 步骤的中间状态），原子写入。
+pub fn save_draft_summary<T: Serialize>(value: &T) -> Result<()> {
+    write_json(DRAFT_SUMMARY_FILE, value)
+}
+
+/// 加载草稿摘要。文件不存在返回 `Ok(None)`；JSON 损坏会被备份且返回 `Ok(None)`。
+pub fn load_draft_summary<T: DeserializeOwned>() -> Result<Option<T>> {
+    let path = data_dir()?.join(DRAFT_SUMMARY_FILE);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let bytes = match fs::read(&path) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!("读取草稿 {} 失败: {} (视为无草稿)", path.display(), e);
+            return Ok(None);
+        }
+    };
+    match serde_json::from_slice::<T>(&bytes) {
+        Ok(v) => Ok(Some(v)),
+        Err(err) => {
+            tracing::warn!("草稿 JSON 解析失败 {}: {} (已备份)", path.display(), err);
+            backup_broken(&path)?;
+            Ok(None)
+        }
+    }
+}
+
+/// 清除草稿摘要文件。文件不存在时静默成功。
+pub fn clear_draft_summary() -> Result<()> {
+    let path = data_dir()?.join(DRAFT_SUMMARY_FILE);
+    if path.exists() {
+        fs::remove_file(&path).with_context(|| format!("删除草稿失败: {}", path.display()))?;
+    }
+    Ok(())
+}
+
 /// 保存报告 Markdown 到 `reports/<id>.md`，返回完整路径。原子写入。
 pub fn save_report_file(id: &str, content: &str) -> Result<PathBuf> {
     let path = data_dir()?.join("reports").join(format!("{id}.md"));

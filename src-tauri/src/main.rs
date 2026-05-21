@@ -89,6 +89,11 @@ fn main() {
             get_report,
             delete_report,
             generate_report,
+            collect_logs,
+            render_report,
+            save_draft_summary,
+            load_draft_summary,
+            clear_draft_summary,
             // Settings
             get_settings,
             save_settings,
@@ -259,6 +264,60 @@ async fn generate_report(req: GenerateRequest) -> Result<report::GenerationOutpu
     )
     .await
     .map_err(err_to_string)
+}
+
+// 两步生成新流程（详见 docs/SPEC.md "两步生成"）：
+//   1. collect_logs：扫日志 + 聚合 → 返回带 timestamp 的 Summary 供前端编辑
+//   2. render_report：用编辑后的 Summary 调 LLM + 存档
+// 草稿 3 个命令支持"上次未完成的编辑下次继续"。
+
+#[derive(Debug, Clone, Deserialize)]
+struct CollectLogsRequest {
+    workspace_ids: Vec<String>,
+    days: u32,
+}
+
+#[tauri::command]
+async fn collect_logs(req: CollectLogsRequest) -> Result<report::CollectionOutput, String> {
+    report::collect_summary(&req.workspace_ids, req.days)
+        .await
+        .map_err(err_to_string)
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RenderReportRequest {
+    summary: logs::Summary,
+    template_id: String,
+    days: u32,
+    #[serde(default)]
+    provider_id: Option<String>,
+}
+
+#[tauri::command]
+async fn render_report(req: RenderReportRequest) -> Result<report::GenerationOutput, String> {
+    report::render_from_summary(
+        &req.summary,
+        &req.template_id,
+        req.days,
+        req.provider_id.as_deref(),
+    )
+    .await
+    .map_err(err_to_string)
+}
+
+#[tauri::command]
+fn save_draft_summary(draft: report::CollectionOutput) -> Result<(), String> {
+    store::save_draft_summary(&draft).map_err(err_to_string)
+}
+
+#[tauri::command]
+fn load_draft_summary() -> Result<Option<report::CollectionOutput>, String> {
+    store::load_draft_summary::<report::CollectionOutput>().map_err(err_to_string)
+}
+
+#[tauri::command]
+fn clear_draft_summary() -> Result<(), String> {
+    store::clear_draft_summary().map_err(err_to_string)
 }
 
 // ============================================================

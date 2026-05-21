@@ -88,6 +88,7 @@ const ZH_CN: &[(&str, &str)] = &[
     // report.rs
     ("err.report.template_not_found", "模板不存在: {id}"),
     ("err.report.provider_not_found", "指定的 LLM 源不存在: {id}"),
+    ("err.report.no_workspaces", "未选中任何工作区"),
     // email.rs
     ("err.email.no_host", "SMTP host 未配置"),
     ("err.email.no_recipients", "收件人列表为空"),
@@ -152,6 +153,7 @@ const EN: &[(&str, &str)] = &[
     // report.rs
     ("err.report.template_not_found", "Template not found: {id}"),
     ("err.report.provider_not_found", "Specified LLM source not found: {id}"),
+    ("err.report.no_workspaces", "No workspace selected"),
     // email.rs
     ("err.email.no_host", "SMTP host is not configured"),
     ("err.email.no_recipients", "Recipient list is empty"),
