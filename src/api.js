@@ -78,6 +78,11 @@ export function getReport(id) {
   return invoke('get_report', { id });
 }
 
+/// 取报告的 HTML 版本（用于详情页 HTML 预览 / 复制 HTML）。
+export function getReportHtml(id) {
+  return invoke('get_report_html', { id });
+}
+
 export function deleteReport(id) {
   return invoke('delete_report', { id });
 }

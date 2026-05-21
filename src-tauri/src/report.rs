@@ -10,6 +10,7 @@ use anyhow::{anyhow, bail, Result};
 use chrono::Local;
 use serde::{Deserialize, Serialize};
 
+use crate::email;
 use crate::llm::{self, LlmProvider};
 use crate::logs::{self, LogItem, ParseStats, Summary};
 use crate::state;
@@ -173,6 +174,13 @@ pub async fn render_from_summary(
     };
     let saved = state::save_report(record, &markdown)?;
 
+    // 同时存 HTML（供 Reports 详情 HTML 预览 / 复制 HTML）。
+    // 渲染失败不阻塞主路径 —— 旧报告 / 渲染失败时 get_report_html 会现场再渲染。
+    let html = email::render_html(&markdown);
+    if let Err(e) = store::save_report_html_file(&saved.id, &html) {
+        tracing::warn!("保存报告 HTML 失败 {}: {:#}", saved.id, e);
+    }
+
     Ok(GenerationOutput {
         record: saved,
         content: markdown,
@@ -180,6 +188,18 @@ pub async fn render_from_summary(
         skipped_lines: summary_for_prompt.stats.skipped_lines,
         skipped_files: summary_for_prompt.stats.skipped_files,
     })
+}
+
+/// 取报告 HTML：优先用磁盘上的 `<id>.html`，没有就从 `.md` 现场渲染。
+///
+/// 用于 Reports 详情的 HTML 预览 + 复制 HTML 功能。旧报告（本 PR 之前生成）
+/// 没有 .html 文件，按需 fallback 现场渲染。
+pub fn get_report_html(id: &str) -> Result<String> {
+    if let Some(cached) = store::load_report_html_file(id)? {
+        return Ok(cached);
+    }
+    let md = store::load_report_file(id)?;
+    Ok(email::render_html(&md))
 }
 
 /// 编辑后用户可能删/增条目，按当前 by_project 重算 prompt 数 / 项目数 / 主项目。

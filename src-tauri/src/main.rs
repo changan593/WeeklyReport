@@ -87,6 +87,7 @@ fn main() {
             // Reports
             list_reports,
             get_report,
+            get_report_html,
             delete_report,
             generate_report,
             collect_logs,
@@ -238,6 +239,13 @@ async fn list_reports() -> Result<Vec<ReportRecord>, String> {
 async fn get_report(id: String) -> Result<ReportPayload, String> {
     let (record, content) = state::get_report(&id).map_err(err_to_string)?;
     Ok(ReportPayload { record, content })
+}
+
+/// 取报告的 HTML 版本（用于 Reports 详情的 HTML 预览 / 复制 HTML）。
+/// 优先返回保存的 .html，没有就从 .md 现场渲染。
+#[tauri::command]
+async fn get_report_html(id: String) -> Result<String, String> {
+    report::get_report_html(&id).map_err(err_to_string)
 }
 
 #[tauri::command]
