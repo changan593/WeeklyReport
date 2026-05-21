@@ -3,7 +3,7 @@
 // 视觉规范：stone 系列 warm gray，圆角 lg/md/sm，line-stroke 风格 SVG。
 // 所有组件都是无状态函数组件。
 
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 
 // ============================================================
 // Icon 库
@@ -223,12 +223,21 @@ export function Modal({ onClose, children, width = 'max-w-lg' }) {
     return () => window.removeEventListener('keydown', onKey);
   }, [onClose]);
 
+  // 仅当 mousedown 和 mouseup 都发生在 backdrop 时才关闭，避免在输入框
+  // 内开始拖选文本、鼠标松开点落到 backdrop 上而误触发的"drag-to-close"
+  const downOnBackdrop = useRef(false);
+
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-stone-900/30 p-4"
-      onClick={(e) => {
-        // 仅点击空白处关闭
-        if (e.target === e.currentTarget) onClose?.();
+      onMouseDown={(e) => {
+        downOnBackdrop.current = e.target === e.currentTarget;
+      }}
+      onMouseUp={(e) => {
+        if (downOnBackdrop.current && e.target === e.currentTarget) {
+          onClose?.();
+        }
+        downOnBackdrop.current = false;
       }}
     >
       <div
