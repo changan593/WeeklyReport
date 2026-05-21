@@ -67,14 +67,17 @@ ssh-copy-id user@host
 
 #### Windows（PowerShell）
 
-PowerShell 没有 `ssh-copy-id`，手动拼一条等价命令：
+PowerShell 没有 `ssh-copy-id`。不要用 `Get-Content ... | ssh "..."` 这种单条管道版本——`Get-Content` 占了 stdin，ssh 弹密码 prompt 时拿不到干净的 tty，密码输入会出现异常（看起来输错了，其实是被吞了）。改用两步法：
 
 ```powershell
-Get-Content $env:USERPROFILE\.ssh\id_ed25519.pub `
-  | ssh user@host "mkdir -p ~/.ssh && chmod 700 ~/.ssh && cat >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"
+# Step 1：把本机公钥 scp 到远端 /tmp（会要一次远端密码）
+scp $env:USERPROFILE\.ssh\id_ed25519.pub user@host:/tmp/wr_pubkey.pub
+
+# Step 2：远端追加到 authorized_keys 并清理临时文件（会再要一次密码）
+ssh user@host "mkdir -p ~/.ssh && chmod 700 ~/.ssh && cat /tmp/wr_pubkey.pub >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys && rm /tmp/wr_pubkey.pub"
 ```
 
-会要求输入一次远端密码。`>> authorized_keys` 是追加而非覆盖，远端已有的其他公钥不会被清掉。
+每一步的密码 prompt 都走正常 tty，不会被 stdin 抢走。`>> authorized_keys` 是追加而非覆盖，远端已有的其他公钥不会被清掉。
 
 把 `user` 和 `host` 替换成你的远端用户名和地址（如 `changan@dev.example.com`）。
 
