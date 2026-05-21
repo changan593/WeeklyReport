@@ -1,11 +1,13 @@
 // 历史周报页（详见 docs/UI.md#44-历史周报页-reportsjsx）。
 //
-// 列出所有已存档报告（表格视图）；点击行进入详情；详情可复制 Markdown / 删除。
+// 列出所有已存档报告（表格视图）；点击行进入详情；详情可在 Markdown / HTML 间切换，
+// 复制按钮按当前 tab 复制对应内容；可删除。
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   deleteReport,
   getReport,
+  getReportHtml,
   listReports,
   useAsyncState,
   formatError,
@@ -110,11 +112,28 @@ function ReportTable({ items, onOpen }) {
 function ReportDetail({ id, onClose, onDeleted }) {
   const { t } = useTranslation();
   const [data, loading, , error] = useAsyncState(() => getReport(id), [id]);
+  const [tab, setTab] = useState('md'); // 'md' | 'html'
+  const [html, setHtml] = useState(null);
+  const [htmlLoading, setHtmlLoading] = useState(false);
+  const [htmlError, setHtmlError] = useState(null);
   const [copied, setCopied] = useState(false);
+
+  // 第一次切到 HTML tab 时才 lazy load（避免不必要的渲染调用）
+  useEffect(() => {
+    if (tab !== 'html' || html != null || htmlLoading) return;
+    setHtmlLoading(true);
+    setHtmlError(null);
+    getReportHtml(id)
+      .then(setHtml)
+      .catch((e) => setHtmlError(formatError(e)))
+      .finally(() => setHtmlLoading(false));
+  }, [tab, html, htmlLoading, id]);
 
   async function handleCopy() {
     try {
-      await navigator.clipboard.writeText(data?.content || '');
+      const text = tab === 'html' ? html || '' : data?.content || '';
+      if (!text) return;
+      await navigator.clipboard.writeText(text);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch (e) {
@@ -135,6 +154,12 @@ function ReportDetail({ id, onClose, onDeleted }) {
       alert(formatError(e));
     }
   }
+
+  const copyLabel = copied
+    ? t('common.copied')
+    : tab === 'html'
+      ? t('reports.actions.copy_html')
+      : t('reports.actions.copy_markdown');
 
   return (
     <Modal onClose={onClose} width="max-w-3xl">
@@ -158,9 +183,17 @@ function ReportDetail({ id, onClose, onDeleted }) {
               <span>{t('reports.detail.tokens', { count: data.record.tokens_used })}</span>
               <span>{formatTs(data.record.generated_at)}</span>
             </div>
-            <pre className="max-h-[60vh] overflow-auto rounded-lg bg-stone-50 p-5 font-mono text-[12px] text-stone-800 whitespace-pre-wrap">
-              {data.content}
-            </pre>
+
+            <TabBar tab={tab} onChange={setTab} />
+
+            {tab === 'md' && (
+              <pre className="max-h-[60vh] overflow-auto whitespace-pre-wrap rounded-lg bg-stone-50 p-5 font-mono text-[12px] text-stone-800">
+                {data.content}
+              </pre>
+            )}
+            {tab === 'html' && (
+              <HtmlPreview html={html} loading={htmlLoading} error={htmlError} />
+            )}
           </>
         )}
       </ModalBody>
@@ -169,13 +202,60 @@ function ReportDetail({ id, onClose, onDeleted }) {
           <Icon name="trash" size={14} /> {t('common.delete')}
         </SecondaryButton>
         <div className="flex gap-2">
-          <SecondaryButton onClick={handleCopy} disabled={!data?.content}>
+          <SecondaryButton onClick={handleCopy} disabled={tab === 'html' ? !html : !data?.content}>
             <Icon name="copy" size={14} />
-            {copied ? t('common.copied') : t('reports.actions.copy_markdown')}
+            {copyLabel}
           </SecondaryButton>
           <PrimaryButton onClick={onClose}>{t('common.close')}</PrimaryButton>
         </div>
       </ModalFooter>
     </Modal>
+  );
+}
+
+function TabBar({ tab, onChange }) {
+  const { t } = useTranslation();
+  const tabs = [
+    { key: 'md', label: t('reports.tab.markdown') },
+    { key: 'html', label: t('reports.tab.html') },
+  ];
+  return (
+    <div className="inline-flex rounded-md border border-stone-200 p-0.5">
+      {tabs.map((x) => (
+        <button
+          key={x.key}
+          type="button"
+          onClick={() => onChange(x.key)}
+          className={`rounded px-3 py-1 text-[12.5px] ${
+            tab === x.key
+              ? 'bg-stone-900 text-white'
+              : 'text-stone-600 hover:text-stone-900'
+          }`}
+        >
+          {x.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/// HTML 预览用 iframe + srcDoc + sandbox（无脚本、无同源），避免污染全局样式 + XSS。
+function HtmlPreview({ html, loading, error }) {
+  if (loading) return <LoadingState />;
+  if (error) {
+    return (
+      <div className="rounded border border-rose-200 bg-rose-50 px-3 py-2 text-[12.5px] text-rose-700">
+        {error}
+      </div>
+    );
+  }
+  if (!html) return null;
+  return (
+    <iframe
+      srcDoc={html}
+      title="HTML preview"
+      sandbox=""
+      className="h-[60vh] w-full rounded-lg border border-stone-200 bg-white"
+    />
   );
 }

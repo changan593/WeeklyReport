@@ -254,17 +254,44 @@ pub fn save_report_file(id: &str, content: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
+/// 保存报告 HTML 到 `reports/<id>.html`（同时保存 .md 与 .html 两份）。原子写入。
+pub fn save_report_html_file(id: &str, html: &str) -> Result<PathBuf> {
+    let path = data_dir()?.join("reports").join(format!("{id}.html"));
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    atomic_write(&path, html.as_bytes())?;
+    Ok(path)
+}
+
 /// 读取 `reports/<id>.md` 全文。文件不存在时返回错误。
 pub fn load_report_file(id: &str) -> Result<String> {
     let path = data_dir()?.join("reports").join(format!("{id}.md"));
     fs::read_to_string(&path).with_context(|| format!("读取报告失败: {}", path.display()))
 }
 
-/// 删除 `reports/<id>.md`。文件不存在时静默成功。
+/// 读取 `reports/<id>.html`。文件不存在返回 `Ok(None)`（旧报告未生成 html 时按需现场渲染）。
+pub fn load_report_html_file(id: &str) -> Result<Option<String>> {
+    let path = data_dir()?.join("reports").join(format!("{id}.html"));
+    if !path.exists() {
+        return Ok(None);
+    }
+    Ok(Some(fs::read_to_string(&path).with_context(|| {
+        format!("读取报告 HTML 失败: {}", path.display())
+    })?))
+}
+
+/// 删除 `reports/<id>.md` 及同名 `.html`（如果存在）。文件不存在时静默成功。
 pub fn delete_report_file(id: &str) -> Result<()> {
-    let path = data_dir()?.join("reports").join(format!("{id}.md"));
-    if path.exists() {
-        fs::remove_file(&path).with_context(|| format!("删除报告失败: {}", path.display()))?;
+    let dir = data_dir()?.join("reports");
+    let md = dir.join(format!("{id}.md"));
+    if md.exists() {
+        fs::remove_file(&md).with_context(|| format!("删除报告失败: {}", md.display()))?;
+    }
+    let html = dir.join(format!("{id}.html"));
+    if html.exists() {
+        fs::remove_file(&html)
+            .with_context(|| format!("删除报告 HTML 失败: {}", html.display()))?;
     }
     Ok(())
 }

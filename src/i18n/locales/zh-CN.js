@@ -104,6 +104,11 @@ export default {
     },
     actions: {
       copy_markdown: '复制 Markdown',
+      copy_html: '复制 HTML',
+    },
+    tab: {
+      markdown: 'Markdown',
+      html: 'HTML 预览',
     },
   },
   workspaces: {

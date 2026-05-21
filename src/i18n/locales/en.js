@@ -104,6 +104,11 @@ export default {
     },
     actions: {
       copy_markdown: 'Copy Markdown',
+      copy_html: 'Copy HTML',
+    },
+    tab: {
+      markdown: 'Markdown',
+      html: 'HTML preview',
     },
   },
   workspaces: {
