@@ -11,17 +11,23 @@ import Settings from './components/Settings.jsx';
 import Templates from './components/Templates.jsx';
 import { Icon } from './components/ui.jsx';
 import Workspaces from './components/Workspaces.jsx';
+import { getSettings } from './api.js';
+import { useSyncLangFromBackend, useTranslation } from './i18n/index.js';
 
-const NAV = [
-  { key: 'workspaces', label: '工作区', icon: 'workspace' },
-  { key: 'providers', label: 'LLM 源', icon: 'llm' },
-  { key: 'templates', label: '周报模板', icon: 'template' },
-  { key: 'reports', label: '历史周报', icon: 'report' },
-  { key: 'schedules', label: '定时任务', icon: 'schedule' },
-  { key: 'settings', label: '设置', icon: 'settings' },
+const NAV_ITEMS = [
+  { key: 'workspaces', i18nKey: 'nav.workspaces', icon: 'workspace' },
+  { key: 'providers', i18nKey: 'nav.providers', icon: 'llm' },
+  { key: 'templates', i18nKey: 'nav.templates', icon: 'template' },
+  { key: 'reports', i18nKey: 'nav.reports', icon: 'report' },
+  { key: 'schedules', i18nKey: 'nav.schedules', icon: 'schedule' },
+  { key: 'settings', i18nKey: 'nav.settings', icon: 'settings' },
 ];
 
 export default function App() {
+  const { t } = useTranslation();
+  // 启动时把后端 Settings.language 同步到前端 i18n 状态
+  useSyncLangFromBackend(getSettings);
+
   const [page, setPage] = useState('workspaces');
   const [genOpen, setGenOpen] = useState(false);
   // 用一个 nonce 触发 Reports 页面重载（生成完报告后）
@@ -37,7 +43,7 @@ export default function App() {
           </div>
         </div>
         <nav className="flex-1 px-2 py-2">
-          {NAV.map((item) => (
+          {NAV_ITEMS.map((item) => (
             <button
               key={item.key}
               type="button"
@@ -49,7 +55,7 @@ export default function App() {
               }`}
             >
               <Icon name={item.icon} size={16} />
-              <span>{item.label}</span>
+              <span>{t(item.i18nKey)}</span>
             </button>
           ))}
         </nav>
@@ -60,7 +66,7 @@ export default function App() {
             className="flex w-full items-center justify-center gap-1.5 rounded-md bg-stone-900 px-3 py-2 text-[12.5px] text-white hover:bg-stone-800"
           >
             <Icon name="sparkle" size={15} />
-            <span>生成周报</span>
+            <span>{t('sidebar.generate')}</span>
           </button>
         </div>
       </aside>
@@ -89,19 +95,5 @@ function Page({ page, reportsNonce }) {
   if (page === 'reports') return <Reports key={reportsNonce} />;
   if (page === 'schedules') return <Schedules />;
   if (page === 'settings') return <Settings />;
-  return (
-    <Placeholder
-      title={NAV.find((n) => n.key === page)?.label || ''}
-      description="此页面由后续阶段实现。"
-    />
-  );
-}
-
-function Placeholder({ title, description }) {
-  return (
-    <div>
-      <h1 className="text-2xl font-medium text-stone-900">{title}</h1>
-      <p className="mt-2 text-[13px] text-stone-500">{description}</p>
-    </div>
-  );
+  return null;
 }

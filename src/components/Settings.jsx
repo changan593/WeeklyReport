@@ -6,12 +6,15 @@
 import { useEffect, useState } from 'react';
 import {
   dataDirPath,
+  getSettings,
   getSmtpConfig,
-  sendTestEmail,
+  saveSettings,
   saveSmtpConfig,
+  sendTestEmail,
   testSmtpConfig,
   formatError,
 } from '../api.js';
+import { SUPPORTED_LANGS, useTranslation } from '../i18n/index.js';
 import {
   FormField,
   Icon,
@@ -21,6 +24,11 @@ import {
   SecondaryButton,
   StatusBanner,
 } from './ui.jsx';
+
+const LANG_OPTIONS = [
+  { value: 'zh-CN', i18nKey: 'settings.language.zh_cn' },
+  { value: 'en', i18nKey: 'settings.language.en' },
+];
 
 const SMTP_PRESETS = [
   {
@@ -70,6 +78,7 @@ const EMPTY = {
 };
 
 export default function Settings() {
+  const { t, lang, setLang } = useTranslation();
   const [cfg, setCfg] = useState(EMPTY);
   const [loaded, setLoaded] = useState(false);
   const [presetHint, setPresetHint] = useState(null);
@@ -77,6 +86,8 @@ export default function Settings() {
   const [busy, setBusy] = useState(null); // null | 'test' | 'send' | 'save'
   const [testEmail, setTestEmail] = useState('');
   const [dataDir, setDataDir] = useState('');
+  // 存当前后端 Settings 全量值，切换语言时回写要保留其余字段
+  const [settings, setSettings] = useState(null);
 
   useEffect(() => {
     getSmtpConfig()
@@ -86,7 +97,21 @@ export default function Settings() {
       .catch(() => {})
       .finally(() => setLoaded(true));
     dataDirPath().then(setDataDir).catch(() => setDataDir(''));
+    getSettings().then(setSettings).catch(() => setSettings(null));
   }, []);
+
+  async function handleChangeLang(next) {
+    if (next === lang) return;
+    setLang(next); // 立即生效 UI
+    // 同步到后端 Settings.language；失败不阻塞 UI
+    try {
+      const merged = { ...(settings ?? {}), language: next };
+      await saveSettings(merged);
+      setSettings(merged);
+    } catch (e) {
+      setStatus({ type: 'error', msg: formatError(e) });
+    }
+  }
 
   function set(field, value) {
     setCfg((prev) => ({ ...prev, [field]: value }));
@@ -158,13 +183,31 @@ export default function Settings() {
   return (
     <div>
       <header className="mb-6">
-        <h1 className="text-2xl font-medium text-stone-900">设置</h1>
-        <p className="mt-1 text-[13px] text-stone-500">
-          配置 SMTP（用于定时任务发送邮件）；查看数据目录
-        </p>
+        <h1 className="text-2xl font-medium text-stone-900">{t('settings.title')}</h1>
+        <p className="mt-1 text-[13px] text-stone-500">{t('settings.subtitle')}</p>
       </header>
 
-      <Section title="SMTP 邮箱配置">
+      <Section title={t('settings.sections.language')}>
+        <div className="inline-flex rounded-md border border-stone-200 p-0.5">
+          {LANG_OPTIONS.filter((o) => SUPPORTED_LANGS.includes(o.value)).map((opt) => (
+            <button
+              key={opt.value}
+              type="button"
+              onClick={() => handleChangeLang(opt.value)}
+              className={`rounded px-3 py-1 text-[12.5px] ${
+                lang === opt.value
+                  ? 'bg-stone-900 text-white'
+                  : 'text-stone-600 hover:text-stone-900'
+              }`}
+            >
+              {t(opt.i18nKey)}
+            </button>
+          ))}
+        </div>
+        <p className="mt-2 text-[12px] text-stone-500">{t('settings.language.hint')}</p>
+      </Section>
+
+      <Section title={t('settings.sections.smtp')}>
         {/* 预设按钮 */}
         <div className="mb-3">
           <div className="mb-1.5 text-[11.5px] font-medium text-stone-600">快速预设</div>
@@ -272,10 +315,8 @@ export default function Settings() {
         </div>
       </Section>
 
-      <Section title="数据存储">
-        <p className="text-[12.5px] text-stone-600">
-          所有配置以 JSON 文件形式存放在以下目录；可直接备份或迁移。
-        </p>
+      <Section title={t('settings.sections.data')}>
+        <p className="text-[12.5px] text-stone-600">{t('settings.data.desc')}</p>
         <div className="mt-2 break-all rounded bg-stone-50 px-3 py-2 font-mono text-[12px] text-stone-700">
           {dataDir || '—'}
         </div>

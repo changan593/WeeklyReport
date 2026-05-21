@@ -51,6 +51,14 @@ pub struct Settings {
     pub prompt_clip_chars: u32,
     /// 生成时注入到 prompt 的历史报告数量。默认 2。
     pub past_reports_context: u32,
+    /// 应用界面语言（IETF BCP 47 简化）。当前支持 `"zh-CN"` / `"en"`。默认 `"zh-CN"`。
+    /// 前端 i18n 资源在 `src/i18n/locales/`；本字段同步到 LocalStorage 给前端首屏使用。
+    #[serde(default = "default_language")]
+    pub language: String,
+}
+
+fn default_language() -> String {
+    "zh-CN".to_string()
 }
 
 impl Default for Settings {
@@ -58,6 +66,7 @@ impl Default for Settings {
         Self {
             prompt_clip_chars: 200,
             past_reports_context: 2,
+            language: default_language(),
         }
     }
 }
