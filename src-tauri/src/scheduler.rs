@@ -5,6 +5,7 @@
 //! 详见 `docs/ARCHITECTURE.md#39-schedulerrs`。
 #![allow(dead_code)]
 
+use crate::i18n;
 use anyhow::{anyhow, Result};
 use chrono::{Datelike, Local, Utc};
 use cron::Schedule as CronSchedule;
@@ -69,13 +70,18 @@ pub struct SchedulerState {
 impl SchedulerState {
     /// 创建并 **启动** scheduler。返回后即可 `reload_all()` 加载已存任务。
     pub async fn new() -> Result<Self> {
-        let scheduler = JobScheduler::new()
-            .await
-            .map_err(|e| anyhow!("初始化 scheduler 失败: {e}"))?;
-        scheduler
-            .start()
-            .await
-            .map_err(|e| anyhow!("启动 scheduler 失败: {e}"))?;
+        let scheduler = JobScheduler::new().await.map_err(|e| {
+            anyhow!(i18n::t_var(
+                "err.scheduler.init_failed",
+                &[("err", &e.to_string())]
+            ))
+        })?;
+        scheduler.start().await.map_err(|e| {
+            anyhow!(i18n::t_var(
+                "err.scheduler.start_failed",
+                &[("err", &e.to_string())]
+            ))
+        })?;
         Ok(Self {
             inner: scheduler,
             jobs: Arc::new(Mutex::new(HashMap::new())),
@@ -136,12 +142,18 @@ impl SchedulerState {
                 }
             })
         })
-        .map_err(|e| anyhow!("cron 表达式无效或 job 构造失败: {e}"))?;
-        let uuid = self
-            .inner
-            .add(job)
-            .await
-            .map_err(|e| anyhow!("添加 job 失败: {e}"))?;
+        .map_err(|e| {
+            anyhow!(i18n::t_var(
+                "err.scheduler.cron_invalid",
+                &[("err", &e.to_string())]
+            ))
+        })?;
+        let uuid = self.inner.add(job).await.map_err(|e| {
+            anyhow!(i18n::t_var(
+                "err.scheduler.add_job_failed",
+                &[("err", &e.to_string())]
+            ))
+        })?;
         self.jobs.lock().await.insert(sch.id.clone(), uuid);
         Ok(())
     }
@@ -173,10 +185,10 @@ pub async fn execute_schedule(sch: &Schedule) -> Result<()> {
 
 async fn run_once(sch: &Schedule) -> Result<String> {
     if sch.workspace_ids.is_empty() {
-        return Err(anyhow!("workspace_ids 为空"));
+        return Err(anyhow!(i18n::t("err.scheduler.no_workspaces")));
     }
     if sch.recipients.is_empty() {
-        return Err(anyhow!("recipients 为空，没有发件目标"));
+        return Err(anyhow!(i18n::t("err.scheduler.no_recipients")));
     }
 
     // 1. 生成报告
@@ -211,8 +223,10 @@ pub fn render_subject(tpl: &str, _record: &ReportRecord) -> String {
     let date = now.format("%Y-%m-%d").to_string();
     let week = format!("W{:02}", now.iso_week().week());
 
+    // 用户留空 → 按当前后端语言取默认模板（中:"周报 {date}" / 英:"Weekly Report {date}")
+    let default = i18n::t("email.subject_default_week");
     let raw = if tpl.trim().is_empty() {
-        "周报 {date}"
+        default.as_str()
     } else {
         tpl
     };

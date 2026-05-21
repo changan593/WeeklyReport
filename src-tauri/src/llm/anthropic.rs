@@ -2,6 +2,7 @@
 //!
 //! 协议细节见 `docs/LLM.md#32-anthropic-原生`。
 
+use crate::i18n;
 use anyhow::{anyhow, Result};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -46,7 +47,7 @@ pub fn parse_response(body: &Value) -> Result<(String, u32)> {
         .and_then(|c| c.get(0))
         .and_then(|c| c.get("text"))
         .and_then(|t| t.as_str())
-        .ok_or_else(|| anyhow!("Anthropic 响应缺少 content[0].text"))?
+        .ok_or_else(|| anyhow!(i18n::t("err.llm.anthropic.no_text")))?
         .to_string();
     let usage = body.get("usage");
     let input = usage

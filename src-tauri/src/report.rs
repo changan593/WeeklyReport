@@ -5,6 +5,7 @@
 //! - 历史报告作为风格参考注入（默认最近 2 份）
 #![allow(dead_code)]
 
+use crate::i18n;
 use anyhow::{anyhow, bail, Result};
 use chrono::Local;
 use serde::{Deserialize, Serialize};
@@ -84,7 +85,12 @@ pub async fn run_generation(
     let template = state::list_templates()?
         .into_iter()
         .find(|t| t.id == template_id)
-        .ok_or_else(|| anyhow!("模板不存在: {}", template_id))?;
+        .ok_or_else(|| {
+            anyhow!(i18n::t_var(
+                "err.report.template_not_found",
+                &[("id", template_id)]
+            ))
+        })?;
 
     // 2. 解析 provider（按 LLM.md §6 优先级 显式 > 模板 > 默认 > 第一个）
     let provider = resolve_provider(provider_id, template.provider_id.as_deref())?;
@@ -168,7 +174,10 @@ fn resolve_provider(explicit: Option<&str>, template_pid: Option<&str>) -> Resul
             if let Some(p) = providers.iter().find(|p| p.id == id) {
                 return Ok(p.clone());
             }
-            return Err(anyhow!("指定的 LLM 源不存在: {id}"));
+            return Err(anyhow!(i18n::t_var(
+                "err.report.provider_not_found",
+                &[("id", id)]
+            )));
         }
     }
     if let Some(id) = template_pid {

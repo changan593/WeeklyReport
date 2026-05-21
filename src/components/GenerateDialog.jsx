@@ -10,7 +10,7 @@ import {
   listWorkspaces,
   formatError,
 } from '../api.js';
-import { useTranslation } from '../i18n/index.js';
+import { useTranslation } from '../i18n/index.jsx';
 import {
   FormField,
   Icon,

@@ -100,6 +100,11 @@ export function saveSettings(settings) {
   return invoke('save_settings', { settings });
 }
 
+/// 通知后端 i18n 切换语言（让 anyhow! 错误消息和邮件模板立即跟上 UI）。
+export function setAppLanguage(lang) {
+  return invoke('set_app_language', { lang });
+}
+
 // ============================================================
 // Schedules
 // ============================================================

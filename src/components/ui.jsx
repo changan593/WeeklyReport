@@ -4,7 +4,7 @@
 // 所有组件都是无状态函数组件。
 
 import { useEffect, useRef } from 'react';
-import { useTranslation } from '../i18n/index.js';
+import { useTranslation } from '../i18n/index.jsx';
 
 // ============================================================
 // Icon 库

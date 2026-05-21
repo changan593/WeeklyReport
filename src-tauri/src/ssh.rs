@@ -18,6 +18,7 @@
 //! - `PubkeyAuthentication=no` 跳过公钥试探
 #![allow(dead_code)]
 
+use crate::i18n;
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -74,10 +75,12 @@ pub async fn test(ws: &Workspace) -> Result<String> {
     let mut cmd = build_ssh_command(ws)?;
     cmd.arg(format!("{user}@{host}"));
     cmd.arg(&script);
-    let output = cmd
-        .output()
-        .await
-        .map_err(|e| anyhow!("无法启动 ssh 命令：{e}\n请确认系统已安装 OpenSSH"))?;
+    let output = cmd.output().await.map_err(|e| {
+        anyhow!(i18n::t_var(
+            "err.ssh.exec_failed",
+            &[("err", &e.to_string())]
+        ))
+    })?;
 
     if !output.status.success() {
         return Err(format_ssh_error(
@@ -235,9 +238,12 @@ fn local_tar_command() -> Command {
 async fn tar_pull_jsonl(ws: &Workspace, remote: &str, local: &Path) -> Result<()> {
     let user = ws.user.as_deref().unwrap_or("root");
     let host = ws.host.as_deref().unwrap_or_default();
-    let local_str = local
-        .to_str()
-        .ok_or_else(|| anyhow!("缓存路径不是 UTF-8: {}", local.display()))?;
+    let local_str = local.to_str().ok_or_else(|| {
+        anyhow!(i18n::t_var(
+            "err.ssh.cache_path_utf8",
+            &[("path", &local.display().to_string())],
+        ))
+    })?;
 
     // 1. 启动 ssh：远端跑 tar c，stdout 接 Rust 创建的 pipe
     let mut ssh_cmd = build_ssh_command(ws)?;
@@ -247,9 +253,12 @@ async fn tar_pull_jsonl(ws: &Workspace, remote: &str, local: &Path) -> Result<()
     ssh_cmd.stdout(Stdio::piped());
     ssh_cmd.stderr(Stdio::piped());
 
-    let mut ssh = ssh_cmd
-        .spawn()
-        .map_err(|e| anyhow!("无法启动 ssh 命令：{e}\n请确认系统已安装 OpenSSH"))?;
+    let mut ssh = ssh_cmd.spawn().map_err(|e| {
+        anyhow!(i18n::t_var(
+            "err.ssh.exec_failed",
+            &[("err", &e.to_string())]
+        ))
+    })?;
 
     // 2. 启动本地 tar x，stdin 从 ssh stdout 接管
     let mut tar_cmd = local_tar_command();
@@ -328,10 +337,10 @@ async fn tar_pull_jsonl(ws: &Workspace, remote: &str, local: &Path) -> Result<()
 
 fn require_ssh(ws: &Workspace) -> Result<()> {
     if ws.kind != WorkspaceKind::Ssh {
-        return Err(anyhow!("不是 SSH 工作区"));
+        return Err(anyhow!(i18n::t("err.ssh.not_ssh")));
     }
     if ws.host.as_deref().unwrap_or("").is_empty() {
-        return Err(anyhow!("SSH 工作区缺少 host"));
+        return Err(anyhow!(i18n::t("err.ssh.missing_host")));
     }
     Ok(())
 }
@@ -347,7 +356,7 @@ fn require_password_if_needed(ws: &Workspace) -> Result<Option<String>> {
     }
     let pw = ws.ssh_password.as_deref().unwrap_or("");
     if pw.is_empty() {
-        return Err(anyhow!("SSH 密码方式：ssh_password 不能为空"));
+        return Err(anyhow!(i18n::t("err.ssh.missing_password")));
     }
     Ok(Some(pw.to_string()))
 }
@@ -456,7 +465,7 @@ fn base_ssh_args(ws: &Workspace) -> Vec<String> {
 /// - Linux:   `~/.cache/weekly-report/<ws_id>/`
 /// - Windows: `%LOCALAPPDATA%\WeeklyReport\Cache\<ws_id>\`
 pub fn cache_root(ws_id: &str) -> Result<PathBuf> {
-    let base = dirs::cache_dir().ok_or_else(|| anyhow!("无法定位 OS 缓存目录"))?;
+    let base = dirs::cache_dir().ok_or_else(|| anyhow!(i18n::t("err.ssh.no_cache_dir")))?;
     Ok(base.join(cache_app_name()).join(ws_id))
 }
 

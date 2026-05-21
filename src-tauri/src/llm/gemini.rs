@@ -3,6 +3,7 @@
 //! 协议细节见 `docs/LLM.md#33-google-gemini-原生`。
 //! Gemini 的 API key **走 URL query 参数**而非 header，model 也拼在 path 里。
 
+use crate::i18n;
 use anyhow::{anyhow, Result};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -53,7 +54,7 @@ pub fn parse_response(body: &Value) -> Result<(String, u32)> {
         .and_then(|p| p.get(0))
         .and_then(|p| p.get("text"))
         .and_then(|t| t.as_str())
-        .ok_or_else(|| anyhow!("Gemini 响应缺少 candidates[0].content.parts[0].text"))?
+        .ok_or_else(|| anyhow!(i18n::t("err.llm.gemini.no_text")))?
         .to_string();
     let tokens = body
         .get("usageMetadata")

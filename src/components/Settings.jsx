@@ -12,10 +12,11 @@ import {
   saveSettings,
   saveSmtpConfig,
   sendTestEmail,
+  setAppLanguage,
   testSmtpConfig,
   formatError,
 } from '../api.js';
-import { SUPPORTED_LANGS, useTranslation } from '../i18n/index.js';
+import { SUPPORTED_LANGS, useTranslation } from '../i18n/index.jsx';
 import {
   FormField,
   Icon,
@@ -75,7 +76,13 @@ export default function Settings() {
   async function handleChangeLang(next) {
     if (next === lang) return;
     setLang(next); // 立即生效 UI
-    // 同步到后端 Settings.language；失败不阻塞 UI
+    // 立刻通知后端 i18n（让 anyhow! 错误和邮件模板马上跟上），失败不阻塞 UI
+    try {
+      await setAppLanguage(next);
+    } catch {
+      /* 后端没响应不影响 UI，重启后会被启动同步矫正 */
+    }
+    // 持久化到后端 Settings.language
     try {
       const merged = { ...(settings ?? {}), language: next };
       await saveSettings(merged);
