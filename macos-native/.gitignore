@@ -1,4 +1,7 @@
 .build/
+.swiftpm/
+dist/
+*.dmg
 *.app/
 *.dSYM/
 Icon.icns
