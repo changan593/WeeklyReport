@@ -53,7 +53,7 @@ npm run tauri:build        # 打包发布版
 ## 使用流程
 
 1. **配置 LLM 源** — 在「LLM 源」页面选预设（DeepSeek / OpenAI / 本地 Ollama 等），填入 API key
-2. **添加工作区** — 默认自动加一个本机工作区；需要远程则添加 SSH 工作区
+2. **添加工作区** — 默认自动加一个本机工作区；需要远程则添加 SSH 工作区（配置详见 [docs/SSH.md](./docs/SSH.md)）
 3. **配置 SMTP（可选）** — 「设置」页面填邮箱信息，预设了 Gmail / QQ / 163 / 企业微信
 4. **手动生成测试** — 侧边栏「生成周报」按钮，确认效果
 5. **定时任务** — 「定时任务」页面新建任务，cron 时间 + 收件人 + 模板，启用即可
@@ -76,6 +76,7 @@ npm run tauri:build        # 打包发布版
 | ------------------------------------------------- | ----------------------------------- |
 | [docs/SPEC.md](./docs/SPEC.md)                    | 完整功能规格                         |
 | [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md)    | 技术架构、模块划分、数据模型         |
+| [docs/SSH.md](./docs/SSH.md)                      | SSH 远程工作区配置（密钥生成 + 公钥推送 + 应用内填写） |
 | [docs/LLM.md](./docs/LLM.md)                      | 多 LLM 源协议抽象                    |
 | [docs/JSONL.md](./docs/JSONL.md)                  | Claude Code / Codex CLI 日志 schema  |
 | [docs/UI.md](./docs/UI.md)                        | UI / UX 规格                         |
