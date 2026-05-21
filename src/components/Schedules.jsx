@@ -16,6 +16,7 @@ import {
   useAsyncState,
   formatError,
 } from '../api.js';
+import { useTranslation } from '../i18n/index.js';
 import {
   EmptyState,
   FormField,
@@ -40,15 +41,16 @@ import { splitEmails, formatIsoMinute as formatIso } from '../utils.js';
 // 4 个常用 cron 预设（7 段格式，**按 UTC 解释**）
 // 注：这些是 UTC 时间。中国大陆用户实际本地触发时刻 +8h（如 17:30 UTC = 北京 01:30 次日）。
 const CRON_PRESETS = [
-  { label: '每周五 17:30 UTC', cron: '0 30 17 ? * FRI *' },
-  { label: '每周一 09:00 UTC', cron: '0 0 9 ? * MON *' },
-  { label: '工作日 18:00 UTC', cron: '0 0 18 ? * MON-FRI *' },
-  { label: '每周日 21:00 UTC', cron: '0 0 21 ? * SUN *' },
+  { i18nKey: 'schedules.preset.friday', cron: '0 30 17 ? * FRI *' },
+  { i18nKey: 'schedules.preset.monday', cron: '0 0 9 ? * MON *' },
+  { i18nKey: 'schedules.preset.weekdays', cron: '0 0 18 ? * MON-FRI *' },
+  { i18nKey: 'schedules.preset.sunday', cron: '0 0 21 ? * SUN *' },
 ];
 
 const DAY_OPTIONS = [3, 7, 14, 30];
 
 export default function Schedules() {
+  const { t } = useTranslation();
   const [items, loading, reload] = useAsyncState(listSchedules, []);
   const [workspaces, setWorkspaces] = useState([]);
   const [templates, setTemplates] = useState([]);
@@ -68,7 +70,7 @@ export default function Schedules() {
   }, []);
 
   async function handleDelete(view) {
-    if (!confirm(`删除定时任务「${view.name}」？`)) return;
+    if (!confirm(t('schedules.confirm_delete', { name: view.name }))) return;
     try {
       await deleteSchedule(view.id);
       reload();
@@ -100,25 +102,23 @@ export default function Schedules() {
     <div>
       <header className="mb-6 flex items-end justify-between">
         <div>
-          <h1 className="text-2xl font-medium text-stone-900">定时任务</h1>
-          <p className="mt-1 text-[13px] text-stone-500">
-            按 cron 表达式定时生成周报并发送邮件
-          </p>
+          <h1 className="text-2xl font-medium text-stone-900">{t('schedules.title')}</h1>
+          <p className="mt-1 text-[13px] text-stone-500">{t('schedules.subtitle')}</p>
         </div>
-        <PrimaryButton onClick={() => setEditing(emptySchedule())}>
-          <Icon name="plus" size={15} /> 新建定时任务
+        <PrimaryButton onClick={() => setEditing(emptySchedule(t))}>
+          <Icon name="plus" size={15} /> {t('schedules.add')}
         </PrimaryButton>
       </header>
 
       {!smtpConfigured && (
         <div className="mb-4 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-[12.5px] text-amber-700">
-          ⚠ 尚未配置 SMTP（无法发送邮件），请到「设置」页填写。
+          {t('schedules.no_smtp_warning')}
         </div>
       )}
 
       {loading && <LoadingState />}
       {!loading && items && items.length === 0 && (
-        <EmptyState iconName="schedule" message="还没有定时任务" />
+        <EmptyState iconName="schedule" message={t('schedules.empty')} />
       )}
       {!loading && items && items.length > 0 && (
         <div className="space-y-3">
@@ -153,6 +153,7 @@ export default function Schedules() {
 }
 
 function ScheduleCard({ view, onEdit, onDelete, onToggle, onRunNow }) {
+  const { t } = useTranslation();
   const enabled = view.enabled;
   const lastStatus = view.last_status || '';
   const isFail = lastStatus.startsWith('failed');
@@ -173,14 +174,14 @@ function ScheduleCard({ view, onEdit, onDelete, onToggle, onRunNow }) {
           </code>
         </div>
         <div className="mt-1 text-[12px] text-stone-500">
-          {view.recipients?.length || 0} 个收件人
-          {view.cc?.length > 0 && ` · ${view.cc.length} 个抄送`}
+          {t('schedules.card.recipients', { n: view.recipients?.length || 0 })}
+          {view.cc?.length > 0 && ` · ${t('schedules.card.cc', { n: view.cc.length })}`}
         </div>
         <div className="mt-1 flex flex-wrap gap-x-3 text-[11.5px] text-stone-500">
           {view.next_run_computed && enabled && (
-            <span>下次：{formatIso(view.next_run_computed)}</span>
+            <span>{t('schedules.card.next', { time: formatIso(view.next_run_computed) })}</span>
           )}
-          {view.last_run && <span>上次：{formatIso(view.last_run)}</span>}
+          {view.last_run && <span>{t('schedules.card.last', { time: formatIso(view.last_run) })}</span>}
           {lastStatus && (
             <span className={isFail ? 'text-rose-700' : 'text-emerald-700'}>
               {lastStatus.slice(0, 60)}
@@ -191,13 +192,13 @@ function ScheduleCard({ view, onEdit, onDelete, onToggle, onRunNow }) {
       <div className="flex flex-col items-end gap-2">
         <Toggle on={enabled} onChange={onToggle} />
         <div className="flex gap-0.5">
-          <IconButton title="立即执行" onClick={onRunNow}>
+          <IconButton title={t('schedules.card.run_now')} onClick={onRunNow}>
             <Icon name="play" size={14} />
           </IconButton>
-          <IconButton title="编辑" onClick={onEdit}>
+          <IconButton title={t('schedules.card.edit')} onClick={onEdit}>
             <Icon name="edit" size={14} />
           </IconButton>
-          <IconButton title="删除" onClick={onDelete}>
+          <IconButton title={t('schedules.card.delete')} onClick={onDelete}>
             <Icon name="trash" size={14} />
           </IconButton>
         </div>
@@ -206,7 +207,7 @@ function ScheduleCard({ view, onEdit, onDelete, onToggle, onRunNow }) {
   );
 }
 
-function emptySchedule() {
+function emptySchedule(t) {
   return {
     id: '',
     name: '',
@@ -218,7 +219,7 @@ function emptySchedule() {
     days: 7,
     recipients: [],
     cc: [],
-    subject_tpl: '周报 {date}',
+    subject_tpl: t('schedules.editor.subject_tpl_default'),
     last_run: null,
     last_status: null,
     next_run: null,
@@ -226,6 +227,7 @@ function emptySchedule() {
 }
 
 function ScheduleEditor({ initial, workspaces, templates, providers, onClose, onSaved }) {
+  const { t } = useTranslation();
   // 输入字段 normalize：recipients / cc 用文本 textarea
   const [name, setName] = useState(initial.name || '');
   const [cron, setCron] = useState(initial.cron || '');
@@ -236,7 +238,9 @@ function ScheduleEditor({ initial, workspaces, templates, providers, onClose, on
   const [days, setDays] = useState(initial.days || 7);
   const [recipientsText, setRecipientsText] = useState((initial.recipients || []).join(', '));
   const [ccText, setCcText] = useState((initial.cc || []).join(', '));
-  const [subjectTpl, setSubjectTpl] = useState(initial.subject_tpl || '周报 {date}');
+  const [subjectTpl, setSubjectTpl] = useState(
+    initial.subject_tpl || t('schedules.editor.subject_tpl_default'),
+  );
   const [error, setError] = useState(null);
   const [saving, setSaving] = useState(false);
 
@@ -251,11 +255,11 @@ function ScheduleEditor({ initial, workspaces, templates, providers, onClose, on
 
   async function handleSave() {
     setError(null);
-    if (!name.trim()) return setError('任务名称不能为空');
-    if (!cron.trim()) return setError('cron 表达式不能为空');
-    if (!tplId) return setError('请选择模板');
-    if (wsIds.length === 0) return setError('请选择至少一个工作区');
-    if (recipients.length === 0) return setError('请填写至少一个收件人');
+    if (!name.trim()) return setError(t('schedules.editor.name_required'));
+    if (!cron.trim()) return setError(t('schedules.editor.cron_required'));
+    if (!tplId) return setError(t('schedules.editor.template_required'));
+    if (wsIds.length === 0) return setError(t('schedules.editor.workspace_required'));
+    if (recipients.length === 0) return setError(t('schedules.editor.recipients_required'));
 
     setSaving(true);
     try {
@@ -284,16 +288,16 @@ function ScheduleEditor({ initial, workspaces, templates, providers, onClose, on
 
   return (
     <Modal onClose={onClose} width="max-w-2xl">
-      <ModalHeader title={initial.id ? '编辑定时任务' : '新建定时任务'} onClose={onClose} />
+      <ModalHeader
+        title={initial.id ? t('schedules.editor.title_edit') : t('schedules.editor.title_new')}
+        onClose={onClose}
+      />
       <ModalBody className="space-y-4">
-        <FormField label="任务名称">
-          <Input value={name} onChange={setName} placeholder="如：周五技术周报" />
+        <FormField label={t('schedules.editor.name')}>
+          <Input value={name} onChange={setName} placeholder={t('schedules.editor.name_placeholder')} />
         </FormField>
 
-        <FormField
-          label="cron 表达式（7 段：秒 分 时 日 月 星期 年）"
-          hint="⚠ 按 UTC 时区解释。北京 +8 / 纽约 -5 等需自行换算。下次执行已换算为本地时间。"
-        >
+        <FormField label={t('schedules.editor.cron')} hint={t('schedules.editor.cron_hint')}>
           <Mono value={cron} onChange={setCron} />
           <div className="mt-1.5 flex flex-wrap gap-1.5">
             {CRON_PRESETS.map((p, i) => (
@@ -303,47 +307,47 @@ function ScheduleEditor({ initial, workspaces, templates, providers, onClose, on
                 onClick={() => setCron(p.cron)}
                 className="rounded border border-stone-200 bg-white px-2.5 py-0.5 text-[11.5px] text-stone-600 hover:border-stone-300 hover:text-stone-900"
               >
-                {p.label}
+                {t(p.i18nKey)}
               </button>
             ))}
           </div>
         </FormField>
 
         <div className="grid grid-cols-2 gap-3">
-          <FormField label="模板">
+          <FormField label={t('schedules.editor.template')}>
             <Select value={tplId} onChange={setTplId}>
-              <option value="">（请选择）</option>
-              {templates.map((t) => (
-                <option key={t.id} value={t.id}>
-                  {t.name}
+              <option value="">{t('schedules.editor.template_placeholder')}</option>
+              {templates.map((tpl) => (
+                <option key={tpl.id} value={tpl.id}>
+                  {tpl.name}
                 </option>
               ))}
             </Select>
           </FormField>
-          <FormField label="时间范围">
+          <FormField label={t('schedules.editor.days')}>
             <Select value={String(days)} onChange={(v) => setDays(Number(v))}>
               {DAY_OPTIONS.map((n) => (
                 <option key={n} value={String(n)}>
-                  最近 {n} 天
+                  {t('schedules.editor.days_unit', { n })}
                 </option>
               ))}
             </Select>
           </FormField>
         </div>
 
-        <FormField label="LLM 源（可选，留空则按模板 / 默认源）">
+        <FormField label={t('schedules.editor.llm')}>
           <Select value={provId} onChange={setProvId}>
-            <option value="">按模板 / 默认</option>
+            <option value="">{t('schedules.editor.llm_default')}</option>
             {providers.map((p) => (
               <option key={p.id} value={p.id}>
                 {p.name}
-                {p.is_default ? '（默认）' : ''}
+                {p.is_default ? t('schedules.editor.llm_default_suffix') : ''}
               </option>
             ))}
           </Select>
         </FormField>
 
-        <FormField label="工作区">
+        <FormField label={t('schedules.editor.workspace')}>
           <div className="space-y-1">
             {workspaces.map((w) => (
               <label key={w.id} className="flex items-center gap-2 text-[13px]">
@@ -356,26 +360,26 @@ function ScheduleEditor({ initial, workspaces, templates, providers, onClose, on
               </label>
             ))}
             {workspaces.length === 0 && (
-              <p className="text-[12.5px] text-stone-500">还没有工作区</p>
+              <p className="text-[12.5px] text-stone-500">{t('schedules.editor.workspace_empty')}</p>
             )}
           </div>
         </FormField>
 
-        <FormField label="邮件主题模板" hint="支持 {date} 和 {week} 变量">
+        <FormField label={t('schedules.editor.subject_tpl')} hint={t('schedules.editor.subject_tpl_hint')}>
           <Input value={subjectTpl} onChange={setSubjectTpl} />
         </FormField>
 
-        <FormField label="收件人邮箱" hint="多个用逗号、空格或分号分隔">
+        <FormField label={t('schedules.editor.recipients')} hint={t('schedules.editor.recipients_hint')}>
           <Textarea value={recipientsText} onChange={setRecipientsText} rows={2} />
         </FormField>
 
-        <FormField label="抄送（可选）" hint="多个用逗号、空格或分号分隔">
+        <FormField label={t('schedules.editor.cc')} hint={t('schedules.editor.cc_hint')}>
           <Textarea value={ccText} onChange={setCcText} rows={2} />
         </FormField>
 
         <label className="flex items-center gap-2 text-[13px]">
           <Toggle on={enabled} onChange={setEnabled} />
-          <span>启用</span>
+          <span>{t('schedules.editor.enabled')}</span>
         </label>
 
         {error && (
@@ -383,15 +387,16 @@ function ScheduleEditor({ initial, workspaces, templates, providers, onClose, on
             {error}
           </div>
         )}
+        <StatusBanner status={null} />
       </ModalBody>
       <ModalFooter>
         <div />
         <div className="flex gap-2">
           <SecondaryButton onClick={onClose} disabled={saving}>
-            取消
+            {t('common.cancel')}
           </SecondaryButton>
           <PrimaryButton onClick={handleSave} disabled={saving}>
-            {saving ? '保存中…' : '保存'}
+            {saving ? t('common.saving') : t('common.save')}
           </PrimaryButton>
         </div>
       </ModalFooter>
