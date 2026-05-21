@@ -255,29 +255,39 @@ fn load_past_reports(n: usize) -> Result<Vec<String>> {
 /// 把 Summary + Template + 历史报告拼成最终 prompt 字符串。
 ///
 /// 输出结构对应 `docs/SPEC.md#输出格式`。**纯函数**，便于单测。
+///
+/// 设计目标（PR #6）：
+/// - 每条工作记录带 `[YYYY-MM-DD]` 日期前缀，让 LLM 能按时间组织叙述
+/// - 风格指引细化为具体可执行的规则（避免"口语化"、"做了一些"等弱表达）
+/// - 7 条通用要求 + 禁止短语清单，约束输出朝企业可用方向
 pub fn build_prompt(summary: &Summary, template: &Template, past_reports: &[String]) -> String {
     let mut out = String::new();
     out.push_str("你是工程师周报助手，请基于以下工作日志生成一份 Markdown 格式的周报。\n\n");
 
-    out.push_str(&format!("风格：{}\n", style_label(&template.style)));
+    out.push_str(&format!("# 风格\n{}\n\n", style_label(&template.style)));
+    out.push_str("# 风格指引（务必遵循）\n");
+    out.push_str(style_guide(&template.style));
+    out.push_str("\n\n");
 
     let stats = &summary.stats;
+    out.push_str("# 本期工作概况\n");
     out.push_str(&format!(
-        "活跃天数：{} | 项目数：{} | 主项目：{}\n",
+        "- 活跃天数：{} | 项目数：{} | 主项目：{}\n",
         stats.active_days,
         stats.project_count,
         stats.main_project.as_deref().unwrap_or("无")
     ));
     if !stats.servers.is_empty() {
-        out.push_str(&format!("服务器：{}\n", stats.servers.join("、")));
+        out.push_str(&format!("- 服务器：{}\n", stats.servers.join("、")));
     }
     if !stats.tools.is_empty() {
-        out.push_str(&format!("工具：{}\n", stats.tools.join("、")));
+        out.push_str(&format!("- 工具：{}\n", stats.tools.join("、")));
     }
     out.push('\n');
 
     // 用户工作指令分组（按指令数从多到少排序，便于 LLM 优先处理重点项目）
-    out.push_str("以下是从日志提取的用户工作指令（按项目分组）：\n");
+    // 每条带 [YYYY-MM-DD] 日期前缀，让 LLM 可按时间组织叙述
+    out.push_str("# 工作日志（按项目分组，已用户编辑确认）\n");
     out.push_str("<work_logs>\n");
     let mut projects: Vec<(&String, &Vec<crate::logs::LogItem>)> =
         summary.by_project.iter().collect();
@@ -286,10 +296,15 @@ pub fn build_prompt(summary: &Summary, template: &Template, past_reports: &[Stri
         out.push_str("(本期未提取到任何用户指令)\n");
     } else {
         for (project, items) in projects {
-            out.push_str(&format!("【{}】({} 条指令)\n", project, items.len()));
+            out.push_str(&format!("【{}】({} 条)\n", project, items.len()));
             for item in items {
+                let date = item
+                    .timestamp
+                    .as_deref()
+                    .and_then(|s| s.get(0..10))
+                    .unwrap_or("无日期");
                 let line = item.text.replace('\n', " ");
-                out.push_str(&format!("  · {line}\n"));
+                out.push_str(&format!("  · [{date}] {line}\n"));
             }
             out.push('\n');
         }
@@ -298,7 +313,7 @@ pub fn build_prompt(summary: &Summary, template: &Template, past_reports: &[Stri
 
     // 历史报告作为风格参考
     if !past_reports.is_empty() {
-        out.push_str("以下是最近的历史周报，请**仅参考其结构和语气**，不要照抄具体内容：\n");
+        out.push_str("# 历史周报（仅参考结构和语气，不要照抄）\n");
         for (i, r) in past_reports.iter().enumerate() {
             let idx = i + 1;
             out.push_str(&format!(
@@ -308,27 +323,35 @@ pub fn build_prompt(summary: &Summary, template: &Template, past_reports: &[Stri
     }
 
     // 章节顺序
+    out.push_str("# 输出要求\n\n");
     if !template.sections.is_empty() {
         out.push_str(&format!(
-            "请按以下章节顺序输出 Markdown 周报：{}\n\n",
+            "## 章节顺序\n请按以下章节顺序输出：{}\n\n",
             template.sections.join(" / ")
         ));
-    } else {
-        out.push_str("请输出一份结构清晰的 Markdown 周报。\n\n");
     }
 
-    // 通用要求
-    out.push_str("要求：\n");
-    out.push_str("1. **提炼总结**，不要逐条照抄原始用户指令\n");
-    out.push_str("2. 相似指令应**归纳合并**为一句话\n");
-    out.push_str("3. 下周计划可基于趋势合理推断，但所有非事实陈述都要标注「（推断）」\n");
-    out.push_str("4. 每个章节用 Markdown 二级标题（`##`）开头\n");
-    out.push_str("5. 不要包含本指令中提到的元信息（如 `活跃天数`、`<work_logs>` 标签）\n");
+    // 7 条通用要求
+    out.push_str("## 内容规则\n");
+    out.push_str("1. **提炼成果**：基于用户指令推断实际完成的工作，不要照抄原始指令文本\n");
+    out.push_str("2. **去口语化**：把「做一下」「看看」「弄了下」等口语词替换为具体动词，如「实现 / 重构 / 修复 / 接入 / 调研 / 优化」\n");
+    out.push_str("3. **量化输出**：能数清的优先量化（如「完成 N 个 PR」「修复 M 个 bug」「减少 X% 体积」）\n");
+    out.push_str("4. **聚焦影响**：每项工作说清「做了什么」+「解决了什么问题/带来什么价值」\n");
+    out.push_str("5. **合并相似**：同主题的多条指令合并为一句话；保留时间线信息（如「5/17 起完成 X，5/19 接入 Y」）\n");
+    out.push_str("6. **下周计划**基于趋势合理推断；所有非事实陈述必须标注「（推断）」\n");
+    out.push_str("7. **格式**：章节用 Markdown 二级标题（`##`）；列表用 `-`，不嵌套；不要输出本指令中的元信息（活跃天数 / `<work_logs>` 标签等）\n\n");
+
+    // 禁止短语
+    out.push_str("## 禁止用语\n");
+    out.push_str("以下模糊表达**不允许出现**，每条都要具体到模块/文件/功能：\n");
+    out.push_str("- 「做了一些工作」「写了一些代码」「优化了体验」\n");
+    out.push_str("- 「修复了若干 bug」「处理了一些问题」\n");
+    out.push_str("- 「持续推进」「稳步进行」「逐步完善」\n\n");
 
     // 模板的额外要求
     let extra = template.extra_prompt.trim();
     if !extra.is_empty() {
-        out.push_str("\n额外要求：\n");
+        out.push_str("## 模板额外要求\n");
         out.push_str(extra);
         out.push('\n');
     }
@@ -338,10 +361,40 @@ pub fn build_prompt(summary: &Summary, template: &Template, past_reports: &[Stri
 
 fn style_label(style: &str) -> &'static str {
     match style {
-        "tech" => "技术向 —— 重视代码实现、bug 修复、技术选型",
-        "exec" => "管理层汇报向 —— 重视业务影响、关键产出、风险与阻塞",
-        "simple" => "简洁日报向 —— 要点列出即可，不展开细节",
+        "tech" => "技术向 —— 面向工程师同事；重视代码实现、bug 修复、技术选型",
+        "exec" => "管理层汇报向 —— 面向不写代码的领导；重视业务影响、关键产出、风险与阻塞",
+        "simple" => "简洁日报向 —— 要点列出即可，不展开细节，全文 < 300 字",
         _ => "自定义",
+    }
+}
+
+/// 按 style 返回更具体的风格指引（注入 prompt 让 LLM 真正风格分明）。
+fn style_guide(style: &str) -> &'static str {
+    match style {
+        "tech" => {
+            "\
+- 用具体技术术语：「实现 / 重构 / 修复 / 接入 / 调试 / 性能优化」
+- 描述工作时说清「在哪个模块（文件路径 / 函数名 / 功能名）做了什么改动」
+- 优先量化：完成 N 个 PR / 修 M 个 bug / 体积 -X% / 接入 Y 个 API
+- 技术亮点部分列出本周的关键设计选择、性能提升或安全改进
+- 可以出现少量代码引用（`backtick`）和文件路径"
+        }
+        "exec" => {
+            "\
+- 用非技术听众也能懂的语言；不放代码、不堆术语缩写
+- 每项必带「业务影响」：上线了 X 功能 → 用户可以 Y / 节省了 Z 小时
+- 风险阻塞部分清楚说明阻塞点 + 等待动作 + 影响范围
+- 下周重点用 2-4 条要点列出，每条 < 25 字
+- 不写背景、不写过程；只写「做成了什么 → 产生了什么价值」"
+        }
+        "simple" => {
+            "\
+- 每个 section 用 3-5 行要点，每行 < 30 字
+- 用动词开头：「实现 / 重构 / 修复 / 优化 / 调研」
+- 不写背景、不写细节、不写过程
+- 全文 < 300 字"
+        }
+        _ => "- 按模板章节直接输出；保持简洁、具体、可量化",
     }
 }
 
@@ -453,8 +506,42 @@ mod tests {
         assert!(p.contains("服务器：本机"));
         assert!(p.contains("<work_logs>"));
         assert!(p.contains("</work_logs>"));
-        assert!(p.contains("【weekly-report】(2 条指令)"));
-        assert!(p.contains("· 实现 LLM provider 抽象"));
+        assert!(p.contains("【weekly-report】(2 条)"));
+        // 工作记录带 [YYYY-MM-DD] 日期前缀
+        assert!(p.contains("· [2026-05-17] 实现 LLM provider 抽象"));
+    }
+
+    #[test]
+    fn prompt_includes_style_guide_for_tech() {
+        let p = build_prompt(&sample_summary(), &tech_template(), &[]);
+        // 风格指引包含技术向特有的关键词
+        assert!(p.contains("风格指引"));
+        assert!(p.contains("具体技术术语"));
+        assert!(p.contains("文件路径"));
+    }
+
+    #[test]
+    fn prompt_includes_anti_patterns() {
+        let p = build_prompt(&sample_summary(), &tech_template(), &[]);
+        // 禁止短语清单
+        assert!(p.contains("禁止用语"));
+        assert!(p.contains("做了一些工作"));
+        assert!(p.contains("修复了若干 bug"));
+    }
+
+    #[test]
+    fn prompt_handles_item_without_timestamp() {
+        let mut s = sample_summary();
+        let item_no_ts = LogItem {
+            id: "x".into(),
+            timestamp: None,
+            source: "manual".into(),
+            text: "用户手动新增的内容".into(),
+            manual: true,
+        };
+        s.by_project.insert("misc".into(), vec![item_no_ts]);
+        let p = build_prompt(&s, &tech_template(), &[]);
+        assert!(p.contains("· [无日期] 用户手动新增的内容"));
     }
 
     #[test]
@@ -481,7 +568,7 @@ mod tests {
         assert!(p.contains("<past_report_1>"));
         assert!(p.contains("<past_report_2>"));
         assert!(p.contains("做了 A 和 B"));
-        assert!(p.contains("仅参考其结构和语气"));
+        assert!(p.contains("仅参考结构和语气"));
     }
 
     #[test]
@@ -497,7 +584,7 @@ mod tests {
         assert!(p.contains("活跃天数：0"));
         assert!(p.contains("项目数：0"));
         assert!(p.contains("主项目：无"));
-        assert!(p.contains("（本期未提取到任何用户指令）"));
+        assert!(p.contains("(本期未提取到任何用户指令)"));
     }
 
     #[test]
@@ -505,7 +592,7 @@ mod tests {
         let mut t = tech_template();
         t.extra_prompt = "  请只输出三个章节，每章不超过 3 句。  ".into();
         let p = build_prompt(&sample_summary(), &t, &[]);
-        assert!(p.contains("额外要求："));
+        assert!(p.contains("模板额外要求"));
         assert!(p.contains("请只输出三个章节"));
     }
 
@@ -514,7 +601,7 @@ mod tests {
         let mut t = tech_template();
         t.extra_prompt = "   \n   ".into();
         let p = build_prompt(&sample_summary(), &t, &[]);
-        assert!(!p.contains("额外要求"));
+        assert!(!p.contains("模板额外要求"));
     }
 
     #[test]
