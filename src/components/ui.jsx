@@ -4,6 +4,7 @@
 // 所有组件都是无状态函数组件。
 
 import { useEffect, useRef } from 'react';
+import { useTranslation } from '../i18n/index.js';
 
 // ============================================================
 // Icon 库
@@ -250,10 +251,11 @@ export function Modal({ onClose, children, width = 'max-w-lg' }) {
 }
 
 export function ModalHeader({ title, onClose }) {
+  const { t } = useTranslation();
   return (
     <div className="flex items-center justify-between border-b border-stone-200 px-5 py-3">
       <h2 className="text-[14px] font-medium text-stone-900">{title}</h2>
-      <IconButton title="关闭" onClick={onClose}>
+      <IconButton title={t('ui.modal.close')} onClick={onClose}>
         <Icon name="x" size={16} />
       </IconButton>
     </div>
@@ -300,13 +302,14 @@ export function StatusBanner({ status }) {
 // EmptyState
 // ============================================================
 
-export function EmptyState({ iconName = 'sparkle', message = '还没有内容', children }) {
+export function EmptyState({ iconName = 'sparkle', message, children }) {
+  const { t } = useTranslation();
   return (
     <div className="py-16 text-center">
       <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-xl bg-stone-100 text-stone-400">
         <Icon name={iconName} size={22} />
       </div>
-      <p className="text-[13px] text-stone-500">{message}</p>
+      <p className="text-[13px] text-stone-500">{message ?? t('ui.empty.default')}</p>
       {children && <div className="mt-4">{children}</div>}
     </div>
   );
@@ -316,6 +319,11 @@ export function EmptyState({ iconName = 'sparkle', message = '还没有内容', 
 // LoadingState
 // ============================================================
 
-export function LoadingState({ message = '加载中…' }) {
-  return <div className="py-12 text-center text-[13px] text-stone-400">{message}</div>;
+export function LoadingState({ message }) {
+  const { t } = useTranslation();
+  return (
+    <div className="py-12 text-center text-[13px] text-stone-400">
+      {message ?? t('ui.loading.default')}
+    </div>
+  );
 }

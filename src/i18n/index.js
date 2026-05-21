@@ -60,15 +60,20 @@ export function I18nProvider({ children, initial }) {
   }, []);
 
   const t = useCallback(
-    (key) => {
-      const v = lookup(RESOURCES[lang], key);
-      if (v != null) return v;
+    (key, vars) => {
+      let v = lookup(RESOURCES[lang], key);
       // fallback 到中文，避免英文资源漏 key 时显示生 key
-      if (lang !== DEFAULT_LANG) {
-        const fb = lookup(RESOURCES[DEFAULT_LANG], key);
-        if (fb != null) return fb;
+      if (v == null && lang !== DEFAULT_LANG) {
+        v = lookup(RESOURCES[DEFAULT_LANG], key);
       }
-      return key;
+      if (v == null) return key;
+      // 变量插值：t('xxx', { name: 'foo' }) → '... {name} ...'.replace('{name}', 'foo')
+      if (vars && typeof v === 'string') {
+        return v.replace(/\{(\w+)\}/g, (_, k) =>
+          vars[k] != null ? String(vars[k]) : `{${k}}`
+        );
+      }
+      return v;
     },
     [lang]
   );
