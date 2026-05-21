@@ -1,20 +1,27 @@
 // 生成对话框（详见 docs/UI.md#47-生成对话框-generatedialogjsx）。
 //
-// 4 个 step：config → generating → done | error。
+// 5 个 step：config → collecting → review → generating → done | error
+// review：按项目折叠展示，用户可勾选/编辑/删除/手动新增条目；
+//         编辑过程实时 debounce 自动保存到后端 draft_summary.json
+// 启动时自动检测 draft，提示用户继续/丢弃
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  generateReport,
+  clearDraftSummary,
+  collectLogs,
+  formatError,
   listProviders,
   listTemplates,
   listWorkspaces,
-  formatError,
+  loadDraftSummary,
+  renderReport,
+  saveDraftSummary,
 } from '../api.js';
 import { useTranslation } from '../i18n/index.jsx';
 import {
   FormField,
   Icon,
-  LoadingState,
+  IconButton,
   Modal,
   ModalBody,
   ModalFooter,
@@ -22,9 +29,12 @@ import {
   PrimaryButton,
   SecondaryButton,
   Select,
+  Textarea,
 } from './ui.jsx';
+import { formatIsoMinute } from '../utils.js';
 
 const DAY_OPTIONS = [3, 7, 14, 30];
+const AUTOSAVE_DEBOUNCE_MS = 800;
 
 export default function GenerateDialog({ onClose, onGenerated }) {
   const { t } = useTranslation();
@@ -33,33 +43,45 @@ export default function GenerateDialog({ onClose, onGenerated }) {
   const [providers, setProviders] = useState([]);
   const [bootError, setBootError] = useState(null);
 
-  // 表单状态
+  // config 状态
   const [wsIds, setWsIds] = useState([]);
   const [tplId, setTplId] = useState('');
   const [provId, setProvId] = useState('');
   const [days, setDays] = useState(7);
 
-  // 流程状态
-  const [step, setStep] = useState('config'); // config | generating | done | error
+  // 流程状态：config → collecting → review → generating → done | error
+  const [step, setStep] = useState('config');
+  const [collection, setCollection] = useState(null);
+  const [selectedIds, setSelectedIds] = useState(() => new Set());
+  const [draftSavedAt, setDraftSavedAt] = useState(null);
+  const [draftSaving, setDraftSaving] = useState(false);
+  const [draftDetected, setDraftDetected] = useState(null);
+
   const [result, setResult] = useState(null);
   const [errMsg, setErrMsg] = useState(null);
   const [copied, setCopied] = useState(false);
 
-  // 初次加载
+  // 初次加载 + 检测 draft
   useEffect(() => {
     Promise.all([listWorkspaces(), listTemplates(), listProviders()])
       .then(([wsList, tplList, provList]) => {
         setWorkspaces(wsList || []);
         setTemplates(tplList || []);
         setProviders(provList || []);
-        // 默认全选 workspaces
         setWsIds((wsList || []).map((w) => w.id));
-        // 默认第一个模板
         if ((tplList || []).length > 0) {
           setTplId(tplList[0].id);
         }
       })
       .catch((e) => setBootError(formatError(e)));
+
+    loadDraftSummary()
+      .then((draft) => {
+        if (draft) setDraftDetected(draft);
+      })
+      .catch(() => {
+        /* 草稿加载失败不阻塞 */
+      });
   }, []);
 
   function toggleWs(id) {
@@ -68,7 +90,8 @@ export default function GenerateDialog({ onClose, onGenerated }) {
     );
   }
 
-  async function handleGenerate() {
+  // === 第一步：collect ===
+  async function handleCollect() {
     if (wsIds.length === 0) {
       setErrMsg(t('generate.errors.no_workspace'));
       setStep('error');
@@ -79,22 +102,192 @@ export default function GenerateDialog({ onClose, onGenerated }) {
       setStep('error');
       return;
     }
+    setStep('collecting');
+    setErrMsg(null);
+    try {
+      const out = await collectLogs({ workspace_ids: wsIds, days });
+      setCollection(out);
+      setSelectedIds(allItemIds(out));
+      setStep('review');
+    } catch (e) {
+      setErrMsg(formatError(e));
+      setStep('error');
+    }
+  }
+
+  // === 草稿自动保存（debounce）===
+  // collection 变化（编辑文字 / 删除 / 添加）就 800ms 后保存一次完整 collection。
+  // 勾选状态不持久化（重启后默认全选未删除项）—— 这是"勾选 = 临时筛选"的语义。
+  const draftDebounceRef = useRef(null);
+  useEffect(() => {
+    if (step !== 'review' || !collection) return undefined;
+    if (draftDebounceRef.current) clearTimeout(draftDebounceRef.current);
+    setDraftSaving(true);
+    draftDebounceRef.current = setTimeout(async () => {
+      try {
+        await saveDraftSummary(collection);
+        setDraftSavedAt(new Date());
+      } catch {
+        /* 草稿保存失败不阻塞 UI */
+      } finally {
+        setDraftSaving(false);
+      }
+    }, AUTOSAVE_DEBOUNCE_MS);
+    return () => {
+      if (draftDebounceRef.current) clearTimeout(draftDebounceRef.current);
+    };
+  }, [step, collection]);
+
+  // === 草稿提示：继续 / 丢弃 ===
+  function handleContinueDraft() {
+    if (!draftDetected) return;
+    setCollection(draftDetected);
+    setSelectedIds(allItemIds(draftDetected));
+    setWsIds(draftDetected.workspace_ids || []);
+    setDays(draftDetected.days || 7);
+    setDraftDetected(null);
+    setStep('review');
+  }
+
+  async function handleDiscardDraft() {
+    setDraftDetected(null);
+    try {
+      await clearDraftSummary();
+    } catch {
+      /* 静默 */
+    }
+  }
+
+  // === Review 操作 ===
+  function toggleSelected(id) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  function toggleProjectAll(projectName) {
+    const items = collection.summary.by_project[projectName] || [];
+    const allSelected = items.length > 0 && items.every((it) => selectedIds.has(it.id));
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      items.forEach((it) => {
+        if (allSelected) next.delete(it.id);
+        else next.add(it.id);
+      });
+      return next;
+    });
+  }
+
+  function updateItemText(projectName, itemId, newText) {
+    setCollection((prev) => {
+      const items = prev.summary.by_project[projectName].map((it) =>
+        it.id === itemId ? { ...it, text: newText } : it,
+      );
+      return {
+        ...prev,
+        summary: {
+          ...prev.summary,
+          by_project: { ...prev.summary.by_project, [projectName]: items },
+        },
+      };
+    });
+  }
+
+  function deleteItem(projectName, itemId) {
+    setCollection((prev) => {
+      const items = prev.summary.by_project[projectName].filter((it) => it.id !== itemId);
+      const next = { ...prev.summary.by_project };
+      if (items.length === 0) {
+        delete next[projectName];
+      } else {
+        next[projectName] = items;
+      }
+      return { ...prev, summary: { ...prev.summary, by_project: next } };
+    });
+    setSelectedIds((prev) => {
+      const n = new Set(prev);
+      n.delete(itemId);
+      return n;
+    });
+  }
+
+  function addItem(projectName, text) {
+    const trimmed = text.trim();
+    if (!trimmed) return;
+    const newItem = {
+      id: `manual-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      timestamp: new Date().toISOString(),
+      text: trimmed,
+      source: 'manual',
+      manual: true,
+    };
+    setCollection((prev) => {
+      const items = [...(prev.summary.by_project[projectName] || []), newItem];
+      return {
+        ...prev,
+        summary: {
+          ...prev.summary,
+          by_project: { ...prev.summary.by_project, [projectName]: items },
+        },
+      };
+    });
+    setSelectedIds((prev) => new Set([...prev, newItem.id]));
+  }
+
+  // === 第二步：render ===
+  async function handleRender() {
+    if (selectedIds.size === 0) {
+      setErrMsg(t('generate.review.errors.no_selected'));
+      setStep('error');
+      return;
+    }
+    // 过滤未勾选条目；project 全空则删
+    const filtered = {};
+    Object.entries(collection.summary.by_project).forEach(([proj, items]) => {
+      const kept = items.filter((it) => selectedIds.has(it.id));
+      if (kept.length > 0) filtered[proj] = kept;
+    });
+    const finalSummary = {
+      ...collection.summary,
+      by_project: filtered,
+      // stats 后端 recompute_stats 会重算
+    };
+
     setStep('generating');
     setErrMsg(null);
     try {
-      const r = await generateReport({
-        workspace_ids: wsIds,
+      const r = await renderReport({
+        summary: finalSummary,
         template_id: tplId,
-        days,
+        days: collection.days,
         provider_id: provId || null,
       });
       setResult(r);
+      try {
+        await clearDraftSummary();
+      } catch {
+        /* 静默 */
+      }
       setStep('done');
       onGenerated?.();
     } catch (e) {
       setErrMsg(formatError(e));
       setStep('error');
     }
+  }
+
+  async function handleRefetch() {
+    setCollection(null);
+    setSelectedIds(new Set());
+    try {
+      await clearDraftSummary();
+    } catch {
+      /* 静默 */
+    }
+    setStep('config');
   }
 
   async function handleCopy() {
@@ -113,6 +306,13 @@ export default function GenerateDialog({ onClose, onGenerated }) {
       <ModalHeader title={t('generate.title')} onClose={onClose} />
       <ModalBody className="space-y-4">
         {bootError && <ErrorBox message={bootError} />}
+        {draftDetected && step === 'config' && (
+          <DraftBanner
+            draft={draftDetected}
+            onContinue={handleContinueDraft}
+            onDiscard={handleDiscardDraft}
+          />
+        )}
 
         {step === 'config' && (
           <ConfigStep
@@ -127,6 +327,23 @@ export default function GenerateDialog({ onClose, onGenerated }) {
             onTplChange={setTplId}
             onProvChange={setProvId}
             onDaysChange={setDays}
+          />
+        )}
+
+        {step === 'collecting' && <CollectingStep />}
+
+        {step === 'review' && collection && (
+          <ReviewStep
+            collection={collection}
+            selectedIds={selectedIds}
+            draftSaving={draftSaving}
+            draftSavedAt={draftSavedAt}
+            onToggleItem={toggleSelected}
+            onToggleProject={toggleProjectAll}
+            onUpdateText={updateItemText}
+            onDeleteItem={deleteItem}
+            onAddItem={addItem}
+            onRefetch={handleRefetch}
           />
         )}
 
@@ -163,8 +380,21 @@ export default function GenerateDialog({ onClose, onGenerated }) {
           {step === 'config' && (
             <>
               <SecondaryButton onClick={onClose}>{t('generate.actions.cancel')}</SecondaryButton>
-              <PrimaryButton onClick={handleGenerate}>
+              <PrimaryButton onClick={handleCollect}>
                 <Icon name="sparkle" size={14} /> {t('generate.actions.start')}
+              </PrimaryButton>
+            </>
+          )}
+          {step === 'collecting' && (
+            <SecondaryButton onClick={onClose}>{t('generate.actions.cancel')}</SecondaryButton>
+          )}
+          {step === 'review' && (
+            <>
+              <SecondaryButton onClick={() => setStep('config')}>
+                {t('generate.actions.back')}
+              </SecondaryButton>
+              <PrimaryButton onClick={handleRender}>
+                <Icon name="sparkle" size={14} /> {t('generate.actions.continue_render')}
               </PrimaryButton>
             </>
           )}
@@ -175,7 +405,7 @@ export default function GenerateDialog({ onClose, onGenerated }) {
           )}
           {step === 'error' && (
             <>
-              <SecondaryButton onClick={() => setStep('config')}>
+              <SecondaryButton onClick={() => setStep(collection ? 'review' : 'config')}>
                 {t('generate.actions.back')}
               </SecondaryButton>
               <PrimaryButton onClick={onClose}>{t('generate.actions.close')}</PrimaryButton>
@@ -195,6 +425,19 @@ export default function GenerateDialog({ onClose, onGenerated }) {
     </Modal>
   );
 }
+
+/** 收集所有 item id 形成 Set，用于"默认全选"。 */
+function allItemIds(collectionOutput) {
+  const s = new Set();
+  Object.values(collectionOutput.summary.by_project || {}).forEach((items) => {
+    items.forEach((it) => s.add(it.id));
+  });
+  return s;
+}
+
+// ============================================================
+// ConfigStep
+// ============================================================
 
 function ConfigStep({
   workspaces,
@@ -294,6 +537,317 @@ function ConfigStep({
   );
 }
 
+// ============================================================
+// CollectingStep（新）
+// ============================================================
+
+function CollectingStep() {
+  const { t } = useTranslation();
+  return (
+    <div className="py-12 text-center">
+      <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-xl bg-stone-100 text-stone-500">
+        <Icon name="sparkle" size={22} />
+      </div>
+      <p className="text-[14px] font-medium text-stone-900">{t('generate.collecting.title')}</p>
+      <p className="mt-1 text-[12px] text-stone-500">{t('generate.collecting.subtitle')}</p>
+    </div>
+  );
+}
+
+// ============================================================
+// ReviewStep（新，最复杂）
+// ============================================================
+
+function ReviewStep({
+  collection,
+  selectedIds,
+  draftSaving,
+  draftSavedAt,
+  onToggleItem,
+  onToggleProject,
+  onUpdateText,
+  onDeleteItem,
+  onAddItem,
+  onRefetch,
+}) {
+  const { t } = useTranslation();
+
+  const totalCount = useMemo(() => {
+    return Object.values(collection.summary.by_project).reduce(
+      (s, items) => s + items.length,
+      0,
+    );
+  }, [collection]);
+
+  const selectedCount = useMemo(() => {
+    let n = 0;
+    Object.values(collection.summary.by_project).forEach((items) => {
+      items.forEach((it) => {
+        if (selectedIds.has(it.id)) n += 1;
+      });
+    });
+    return n;
+  }, [collection, selectedIds]);
+
+  // 按条目数从多到少排
+  const projects = useMemo(() => {
+    return Object.entries(collection.summary.by_project).sort(
+      ([, a], [, b]) => b.length - a.length,
+    );
+  }, [collection]);
+
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <h3 className="text-[14px] font-medium text-stone-900">{t('generate.review.title')}</h3>
+          <p className="text-[12px] text-stone-500">{t('generate.review.subtitle')}</p>
+        </div>
+        <div className="flex items-center gap-2 text-[11.5px] text-stone-500">
+          {draftSaving && <span>{t('generate.review.saving')}</span>}
+          {!draftSaving && draftSavedAt && (
+            <span>
+              {t('generate.review.saved_at', {
+                time: formatIsoMinute(draftSavedAt.toISOString()),
+              })}
+            </span>
+          )}
+          <SecondaryButton onClick={onRefetch}>
+            <Icon name="refresh" size={12} /> {t('generate.review.refetch')}
+          </SecondaryButton>
+        </div>
+      </div>
+
+      <div className="rounded-md bg-stone-50 px-3 py-1.5 text-[12px] text-stone-600">
+        {t('generate.review.summary', { total: totalCount, selected: selectedCount })}
+      </div>
+
+      {projects.length === 0 ? (
+        <p className="py-8 text-center text-[12.5px] text-stone-500">
+          {t('generate.review.empty')}
+        </p>
+      ) : (
+        <div className="space-y-2">
+          {projects.map(([name, items]) => (
+            <ProjectSection
+              key={name}
+              name={name}
+              items={items}
+              selectedIds={selectedIds}
+              onToggleItem={onToggleItem}
+              onToggleAll={() => onToggleProject(name)}
+              onUpdateText={(id, text) => onUpdateText(name, id, text)}
+              onDeleteItem={(id) => onDeleteItem(name, id)}
+              onAddItem={(text) => onAddItem(name, text)}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ProjectSection({
+  name,
+  items,
+  selectedIds,
+  onToggleItem,
+  onToggleAll,
+  onUpdateText,
+  onDeleteItem,
+  onAddItem,
+}) {
+  const { t } = useTranslation();
+  const [open, setOpen] = useState(true);
+  const [adding, setAdding] = useState(false);
+  const [newText, setNewText] = useState('');
+
+  const sel = items.filter((it) => selectedIds.has(it.id)).length;
+  const allSelected = items.length > 0 && sel === items.length;
+  const indeterminate = sel > 0 && sel < items.length;
+
+  return (
+    <div className="rounded-lg border border-stone-200 bg-white">
+      <div className="flex items-center gap-2 border-b border-stone-100 px-3 py-2">
+        <button
+          type="button"
+          onClick={() => setOpen((o) => !o)}
+          className="text-stone-500 hover:text-stone-900"
+          aria-label={open ? 'collapse' : 'expand'}
+        >
+          <Icon name={open ? 'chevronD' : 'chevronR'} size={14} />
+        </button>
+        <input
+          type="checkbox"
+          checked={allSelected}
+          ref={(el) => {
+            if (el) el.indeterminate = indeterminate;
+          }}
+          onChange={onToggleAll}
+        />
+        <span className="flex-1 text-[13px] font-medium text-stone-900">{name}</span>
+        <span className="text-[11.5px] text-stone-500">
+          {t('generate.review.project_summary', { selected: sel, total: items.length })}
+        </span>
+      </div>
+
+      {open && (
+        <div className="divide-y divide-stone-100">
+          {items.map((it) => (
+            <ItemRow
+              key={it.id}
+              item={it}
+              selected={selectedIds.has(it.id)}
+              onToggle={() => onToggleItem(it.id)}
+              onUpdate={(text) => onUpdateText(it.id, text)}
+              onDelete={() => onDeleteItem(it.id)}
+            />
+          ))}
+          {adding ? (
+            <div className="space-y-2 px-3 py-2">
+              <Textarea
+                value={newText}
+                onChange={setNewText}
+                rows={2}
+                placeholder={t('generate.review.add_placeholder')}
+              />
+              <div className="flex gap-1.5">
+                <PrimaryButton
+                  onClick={() => {
+                    onAddItem(newText);
+                    setNewText('');
+                    setAdding(false);
+                  }}
+                  disabled={!newText.trim()}
+                >
+                  {t('common.add')}
+                </PrimaryButton>
+                <SecondaryButton
+                  onClick={() => {
+                    setAdding(false);
+                    setNewText('');
+                  }}
+                >
+                  {t('common.cancel')}
+                </SecondaryButton>
+              </div>
+            </div>
+          ) : (
+            <button
+              type="button"
+              onClick={() => setAdding(true)}
+              className="flex w-full items-center gap-1.5 px-3 py-2 text-left text-[12px] text-stone-500 hover:bg-stone-50 hover:text-stone-900"
+            >
+              <Icon name="plus" size={12} />
+              {t('generate.review.add_item')}
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ItemRow({ item, selected, onToggle, onUpdate, onDelete }) {
+  const { t } = useTranslation();
+  const [editing, setEditing] = useState(false);
+  const [draftText, setDraftText] = useState(item.text);
+
+  function saveEdit() {
+    onUpdate(draftText);
+    setEditing(false);
+  }
+
+  function cancelEdit() {
+    setDraftText(item.text);
+    setEditing(false);
+  }
+
+  function handleDelete() {
+    if (confirm(t('generate.review.confirm_delete_item'))) {
+      onDelete();
+    }
+  }
+
+  const sourceLabel = t(`generate.review.source.${item.source}`);
+  const timeLabel = item.timestamp ? formatIsoMinute(item.timestamp) : '';
+  const sourceClass =
+    item.source === 'claude-code'
+      ? 'bg-orange-50 text-orange-700'
+      : item.source === 'codex'
+        ? 'bg-emerald-50 text-emerald-700'
+        : 'bg-stone-100 text-stone-600';
+
+  return (
+    <div className="flex items-start gap-2 px-3 py-2">
+      <input type="checkbox" checked={selected} onChange={onToggle} className="mt-1" />
+      <div className="min-w-0 flex-1">
+        <div className="flex flex-wrap gap-x-2 gap-y-0.5 text-[11px] text-stone-400">
+          {timeLabel && <span>{timeLabel}</span>}
+          <span className={`rounded px-1 ${sourceClass}`}>{sourceLabel}</span>
+        </div>
+        {editing ? (
+          <div className="mt-1 space-y-1.5">
+            <Textarea value={draftText} onChange={setDraftText} rows={3} />
+            <div className="flex gap-1.5">
+              <PrimaryButton onClick={saveEdit}>{t('generate.actions.save_edit')}</PrimaryButton>
+              <SecondaryButton onClick={cancelEdit}>
+                {t('generate.actions.cancel_edit')}
+              </SecondaryButton>
+            </div>
+          </div>
+        ) : (
+          <p className="mt-0.5 whitespace-pre-wrap break-words text-[12.5px] text-stone-700">
+            {item.text}
+          </p>
+        )}
+      </div>
+      {!editing && (
+        <div className="flex gap-0.5">
+          <IconButton title={t('generate.actions.edit')} onClick={() => setEditing(true)}>
+            <Icon name="edit" size={13} />
+          </IconButton>
+          <IconButton title={t('generate.actions.delete')} onClick={handleDelete}>
+            <Icon name="trash" size={13} />
+          </IconButton>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ============================================================
+// DraftBanner（新）
+// ============================================================
+
+function DraftBanner({ draft, onContinue, onDiscard }) {
+  const { t } = useTranslation();
+  // 后端 CollectionOutput 没存 saved_at，显示条目数代替时间提示
+  const itemCount = Object.values(draft.summary.by_project || {}).reduce(
+    (s, items) => s + items.length,
+    0,
+  );
+  const desc = t('generate.draft.detected_desc', { time: `${itemCount} items` });
+  return (
+    <div className="rounded border border-amber-200 bg-amber-50 px-3 py-2">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="text-[12.5px] text-amber-900">
+          <div className="font-medium">{t('generate.draft.detected_title')}</div>
+          <div className="text-[11.5px] text-amber-700">{desc}</div>
+        </div>
+        <div className="flex gap-1.5">
+          <SecondaryButton onClick={onDiscard}>{t('generate.draft.discard')}</SecondaryButton>
+          <PrimaryButton onClick={onContinue}>{t('generate.draft.continue')}</PrimaryButton>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// GeneratingStep / DoneStep / ErrorBox
+// ============================================================
+
 function GeneratingStep() {
   const { t } = useTranslation();
   return (
@@ -325,7 +879,7 @@ function DoneStep({ result, providerName }) {
           })}
         </div>
       )}
-      <pre className="max-h-80 overflow-auto rounded-lg bg-stone-50 p-4 font-mono text-[12px] text-stone-800 whitespace-pre-wrap">
+      <pre className="max-h-80 overflow-auto whitespace-pre-wrap rounded-lg bg-stone-50 p-4 font-mono text-[12px] text-stone-800">
         {result.content}
       </pre>
     </div>
@@ -335,7 +889,7 @@ function DoneStep({ result, providerName }) {
 function ErrorBox({ message }) {
   const { t } = useTranslation();
   return (
-    <div className="rounded border border-rose-200 bg-rose-50 px-3 py-2 text-[12.5px] text-rose-700 whitespace-pre-wrap">
+    <div className="whitespace-pre-wrap rounded border border-rose-200 bg-rose-50 px-3 py-2 text-[12.5px] text-rose-700">
       {message || t('generate.errors.unknown')}
     </div>
   );

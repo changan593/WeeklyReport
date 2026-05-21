@@ -106,6 +106,35 @@ export function setAppLanguage(lang) {
 }
 
 // ============================================================
+// 两步生成（详见 docs/SPEC.md "两步生成"）
+// ============================================================
+
+/// 第一步：收集日志 → 返回带 timestamp 的 Summary（CollectionOutput）。
+export function collectLogs({ workspace_ids, days }) {
+  return invoke('collect_logs', { req: { workspace_ids, days } });
+}
+
+/// 第二步：用（可能已被用户编辑过的）Summary 调 LLM + 存档。
+export function renderReport({ summary, template_id, days, provider_id }) {
+  return invoke('render_report', {
+    req: { summary, template_id, days, provider_id },
+  });
+}
+
+/// 草稿摘要持久化（用户编辑到一半关掉对话框，下次能继续）。
+export function saveDraftSummary(draft) {
+  return invoke('save_draft_summary', { draft });
+}
+
+export function loadDraftSummary() {
+  return invoke('load_draft_summary');
+}
+
+export function clearDraftSummary() {
+  return invoke('clear_draft_summary');
+}
+
+// ============================================================
 // Schedules
 // ============================================================
 

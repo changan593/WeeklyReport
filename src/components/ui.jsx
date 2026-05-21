@@ -46,6 +46,7 @@ const ICONS = {
   clock: 'M12 22a10 10 0 1 1 0-20 10 10 0 0 1 0 20zM12 6v6l4 2',
   mail: 'M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2zM22 6l-10 7L2 6',
   chevronR: 'M9 18l6-6-6-6',
+  chevronD: 'M6 9l6 6 6-6',
 };
 
 export function Icon({ name, size = 18, className = '' }) {
