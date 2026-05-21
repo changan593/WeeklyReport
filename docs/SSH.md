@@ -126,7 +126,7 @@ tar (GNU tar) 1.35
 | User | 登录用户名 |
 | Port | 不填默认 22；非默认端口才填 |
 | Auth method | `key`（默认） |
-| SSH key | 留空使用 `~/.ssh/id_ed25519`，自定义路径才填 |
+| SSH key | **私钥**路径，不是 `.pub` 公钥；留空使用 `~/.ssh/id_ed25519` |
 | SSH password | Auth method 选 `password` 时才填 |
 | Claude path | `~/.claude`（默认）或自定义 |
 | Codex path | `~/.codex`（默认）或自定义 |
@@ -142,6 +142,9 @@ tar (GNU tar) 1.35
 
 ### Q1：测试连接报 `Permission denied (publickey)`
 公钥认证失败。按 §3.3 末尾的检查清单排。
+
+### Q1.5：测试连接报 `Load key "...id_ed25519.pub": invalid format`
+你把**公钥**（`.pub` 结尾）填到 SSH key 字段里了。该字段要的是**私钥**路径——去掉 `.pub` 后缀（写成 `~/.ssh/id_ed25519`），或直接留空让 ssh 自动找默认私钥。
 
 ### Q2：测试连接报 `Connection timed out`
 网络不通。检查防火墙是否放行端口、sshd 是否在跑、VPN 是否连接。

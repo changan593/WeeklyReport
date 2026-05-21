@@ -202,16 +202,27 @@ fn build_remote_tar_cmd(remote: &str) -> String {
 /// "Unknown error"）。优先用 `%SystemRoot%\System32\tar.exe`（Windows 10 1803+
 /// 自带的 bsdtar），避免选到 MSYS2 tar。其他平台保持 PATH 解析的 `tar`。
 fn local_tar_command() -> Command {
-    #[cfg(target_os = "windows")]
-    {
-        if let Ok(sysroot) = std::env::var("SystemRoot") {
-            let p = PathBuf::from(&sysroot).join("System32").join("tar.exe");
-            if p.exists() {
-                return Command::new(p);
+    let mut cmd = {
+        #[cfg(target_os = "windows")]
+        {
+            if let Ok(sysroot) = std::env::var("SystemRoot") {
+                let p = PathBuf::from(&sysroot).join("System32").join("tar.exe");
+                if p.exists() {
+                    Command::new(p)
+                } else {
+                    Command::new("tar")
+                }
+            } else {
+                Command::new("tar")
             }
         }
-    }
-    Command::new("tar")
+        #[cfg(not(target_os = "windows"))]
+        {
+            Command::new("tar")
+        }
+    };
+    hide_console(&mut cmd);
+    cmd
 }
 
 /// 远端 `ssh + tar c` 打包 → 本地 `tar x` 解包，单向流式同步。
@@ -344,7 +355,10 @@ fn require_password_if_needed(ws: &Workspace) -> Result<Option<String>> {
 /// 检查系统是否安装了 `sshpass`。密码认证依赖此工具。
 async fn ensure_sshpass_installed() -> Result<()> {
     // `sshpass -V` 在 stdout 输出版本号并退出 0；命令缺失时 spawn 会失败
-    let res = Command::new("sshpass").arg("-V").output().await;
+    let mut cmd = Command::new("sshpass");
+    cmd.arg("-V");
+    hide_console(&mut cmd);
+    let res = cmd.output().await;
     match res {
         Ok(o) if o.status.success() => Ok(()),
         Ok(o) => Err(anyhow!(
@@ -368,6 +382,7 @@ async fn ensure_sshpass_installed() -> Result<()> {
 /// 构造一个 ssh 子进程命令，根据 `auth_method` 自动套用 `sshpass`。
 ///
 /// 调用方追加 `user@host` 和远端命令后即可 `output().await`。
+/// 已应用 [`hide_console`]，无需再调一遍。
 fn build_ssh_command(ws: &Workspace) -> Result<Command> {
     let password = require_password_if_needed(ws)?;
     let args = base_ssh_args(ws);
@@ -381,7 +396,23 @@ fn build_ssh_command(ws: &Workspace) -> Result<Command> {
         None => Command::new("ssh"),
     };
     cmd.args(args.iter().map(OsStr::new));
+    hide_console(&mut cmd);
     Ok(cmd)
+}
+
+/// Tauri 是 windows-subsystem GUI 应用，spawn `ssh.exe` / `tar.exe` 等控制台
+/// 程序时 Windows 默认会弹出黑色控制台窗口（即使已重定向 stdio 也照弹）。
+/// `CREATE_NO_WINDOW` 标志告诉系统不为子进程分配控制台。
+///
+/// 非 Windows 平台子进程不会有控制台窗口的概念，no-op。
+fn hide_console(cmd: &mut Command) {
+    #[cfg(windows)]
+    {
+        // CREATE_NO_WINDOW，见 winbase.h
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let _ = cmd;
 }
 
 fn base_ssh_args(ws: &Workspace) -> Vec<String> {

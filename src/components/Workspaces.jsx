@@ -282,7 +282,7 @@ function WorkspaceEditor({ initial, onClose, onSaved }) {
               <FormField
                 label="SSH 私钥路径（可选）"
                 className="col-span-2"
-                hint="留空使用系统默认 ~/.ssh/id_rsa"
+                hint="填私钥路径（不是 .pub 公钥）；留空使用系统默认 ~/.ssh/id_ed25519"
               >
                 <Mono
                   value={ws.ssh_key}
