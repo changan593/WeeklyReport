@@ -1,0 +1,8 @@
+.build/
+.swiftpm/
+dist/
+*.dmg
+*.app/
+*.dSYM/
+Icon.icns
+.DS_Store
