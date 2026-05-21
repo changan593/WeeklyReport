@@ -2,6 +2,7 @@
 //!
 //! 协议细节见 `docs/LLM.md#31-openai-兼容`。
 
+use crate::i18n;
 use anyhow::{anyhow, Result};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -47,7 +48,7 @@ pub fn parse_response(body: &Value) -> Result<(String, u32)> {
         .and_then(|c| c.get("message"))
         .and_then(|m| m.get("content"))
         .and_then(|t| t.as_str())
-        .ok_or_else(|| anyhow!("OpenAI 响应缺少 choices[0].message.content"))?
+        .ok_or_else(|| anyhow!(i18n::t("err.llm.openai.no_content")))?
         .to_string();
     let tokens = body
         .get("usage")

@@ -4,6 +4,7 @@
 use tracing_subscriber::EnvFilter;
 
 mod email;
+mod i18n;
 mod llm;
 mod logs;
 mod report;
@@ -37,6 +38,12 @@ fn main() {
         tracing::error!("初始化存储失败: {:#}", err);
     } else if let Err(err) = state::ensure_default_workspace() {
         tracing::error!("初始化默认工作区失败: {:#}", err);
+    }
+
+    // 把 Settings.language 同步给后端 i18n（控制 anyhow! 错误消息与邮件模板的语言）。
+    // 读失败时静默，保持默认 zh-CN。
+    if let Ok(s) = state::get_settings() {
+        i18n::set_language(&s.language);
     }
 
     tauri::Builder::default()
@@ -85,6 +92,7 @@ fn main() {
             // Settings
             get_settings,
             save_settings,
+            set_app_language,
             // SMTP
             get_smtp_config,
             save_smtp_config,
@@ -264,7 +272,15 @@ fn get_settings() -> Result<Settings, String> {
 
 #[tauri::command]
 fn save_settings(settings: Settings) -> Result<(), String> {
+    // 同步 language 给后端 i18n（前端会先调 set_app_language 命令，这里是兜底）
+    i18n::set_language(&settings.language);
     state::save_settings(&settings).map_err(err_to_string)
+}
+
+/// 设置后端 i18n 语言（前端切换 UI 语言时调用，使 anyhow! 错误消息立刻跟上）。
+#[tauri::command]
+fn set_app_language(lang: String) {
+    i18n::set_language(&lang);
 }
 
 // ============================================================
@@ -296,23 +312,29 @@ struct TestEmailRequest {
 async fn send_test_email(req: TestEmailRequest) -> Result<String, String> {
     let recipient = req.to.trim().to_string();
     if recipient.is_empty() {
-        return Err("收件人为空".into());
+        return Err(i18n::t("err.email.recipient_empty"));
     }
+    let time = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
     let body = EmailRequest {
         to: vec![recipient.clone()],
         cc: vec![],
-        subject: "WeeklyReport 测试邮件".into(),
-        body_markdown: format!(
-            "# WeeklyReport 测试邮件\n\n如果你看到这封邮件，说明 SMTP 已配置成功。\n\n- 发件人：`{}`\n- 收件人：`{}`\n- 时间：{}\n",
-            req.config.username,
-            recipient,
-            Local::now().format("%Y-%m-%d %H:%M:%S")
+        subject: i18n::t("email.test.subject"),
+        body_markdown: i18n::t_var(
+            "email.test.body",
+            &[
+                ("from", req.config.username.as_str()),
+                ("to", recipient.as_str()),
+                ("time", time.as_str()),
+            ],
         ),
     };
     email::send(&req.config, &body)
         .await
         .map_err(err_to_string)?;
-    Ok(format!("✓ 测试邮件已发送到 {recipient}"))
+    Ok(i18n::t_var(
+        "msg.test_email_sent",
+        &[("recipient", recipient.as_str())],
+    ))
 }
 
 // ============================================================
@@ -375,9 +397,12 @@ async fn run_schedule_now(id: String) -> Result<String, String> {
         .map_err(err_to_string)?
         .into_iter()
         .find(|s| s.id == id)
-        .ok_or_else(|| format!("任务不存在: {id}"))?;
+        .ok_or_else(|| i18n::t_var("err.schedule.not_found", &[("id", id.as_str())]))?;
     scheduler::execute_schedule(&sch)
         .await
         .map_err(err_to_string)?;
-    Ok(format!("✓ 任务「{}」立即执行完成", sch.name))
+    Ok(i18n::t_var(
+        "msg.schedule_run_done",
+        &[("name", sch.name.as_str())],
+    ))
 }

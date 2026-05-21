@@ -46,12 +46,13 @@ pub fn data_dir() -> Result<PathBuf> {
         .read()
         .expect("DATA_ROOT 锁中毒")
         .clone()
-        .ok_or_else(|| anyhow!("存储未初始化，请先调用 store::init()"))
+        .ok_or_else(|| anyhow!(crate::i18n::t("err.store.not_init")))
 }
 
 /// 计算 OS 默认数据目录（不创建）。
 fn default_data_dir() -> Result<PathBuf> {
-    let base = dirs::config_dir().ok_or_else(|| anyhow!("无法定位 OS 配置目录"))?;
+    let base =
+        dirs::config_dir().ok_or_else(|| anyhow!(crate::i18n::t("err.store.no_config_dir")))?;
     Ok(base.join(app_dir_name()))
 }
 

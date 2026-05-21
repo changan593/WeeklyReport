@@ -12,7 +12,7 @@ import Templates from './components/Templates.jsx';
 import { Icon } from './components/ui.jsx';
 import Workspaces from './components/Workspaces.jsx';
 import { getSettings } from './api.js';
-import { useSyncLangFromBackend, useTranslation } from './i18n/index.js';
+import { useSyncLangFromBackend, useTranslation } from './i18n/index.jsx';
 
 const NAV_ITEMS = [
   { key: 'workspaces', i18nKey: 'nav.workspaces', icon: 'workspace' },

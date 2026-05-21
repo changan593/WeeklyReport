@@ -156,7 +156,12 @@ pub async fn collect_messages(
         ))
     })
     .await
-    .map_err(|e| anyhow!("收集任务 panic: {e}"))?
+    .map_err(|e| {
+        anyhow!(crate::i18n::t_var(
+            "err.logs.collect_panic",
+            &[("err", &e.to_string())]
+        ))
+    })?
 }
 
 /// 本机工作区根据 tools 决定哪些路径要扫；未启用的工具返回 None。

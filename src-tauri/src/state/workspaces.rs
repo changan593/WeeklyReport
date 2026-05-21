@@ -47,7 +47,8 @@ pub fn ensure_default_workspace() -> Result<()> {
     if !existing.is_empty() {
         return Ok(());
     }
-    let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("无法定位用户家目录"))?;
+    let home =
+        dirs::home_dir().ok_or_else(|| anyhow::anyhow!(crate::i18n::t("err.state.no_home_dir")))?;
     let ws = Workspace {
         id: Uuid::new_v4().to_string(),
         name: "本机".to_string(),

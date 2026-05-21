@@ -33,10 +33,12 @@ pub fn save_report(mut record: ReportRecord, content: &str) -> Result<ReportReco
 /// 返回 (元数据, Markdown 正文)。
 pub fn get_report(id: &str) -> Result<(ReportRecord, String)> {
     let list = list_reports()?;
-    let record = list
-        .into_iter()
-        .find(|r| r.id == id)
-        .ok_or_else(|| anyhow!("报告不存在: {id}"))?;
+    let record = list.into_iter().find(|r| r.id == id).ok_or_else(|| {
+        anyhow!(crate::i18n::t_var(
+            "err.state.report_not_found",
+            &[("id", id)]
+        ))
+    })?;
     let content = store::load_report_file(id)?;
     Ok((record, content))
 }

@@ -6,6 +6,7 @@
 //! - 详细 HTML 渲染语法：见 `docs/DECISIONS.md#adr-007不写复杂-markdown-渲染器`
 #![allow(dead_code)]
 
+use crate::i18n;
 use anyhow::{anyhow, Context, Result};
 use lettre::message::header::ContentType;
 use lettre::message::{Mailbox, Message, MultiPart, SinglePart};
@@ -69,10 +70,10 @@ pub struct EmailRequest {
 
 pub async fn send(cfg: &SmtpConfig, req: &EmailRequest) -> Result<()> {
     if cfg.host.trim().is_empty() {
-        return Err(anyhow!("SMTP host 未配置"));
+        return Err(anyhow!(i18n::t("err.email.no_host")));
     }
     if req.to.is_empty() {
-        return Err(anyhow!("收件人列表为空"));
+        return Err(anyhow!(i18n::t("err.email.no_recipients")));
     }
 
     let transport = build_transport(cfg)?;
@@ -101,31 +102,42 @@ pub async fn send(cfg: &SmtpConfig, req: &EmailRequest) -> Result<()> {
                 .body(html),
         );
 
-    let msg = builder.multipart(body).context("构造邮件失败")?;
-    transport
-        .send(msg)
-        .await
-        .map_err(|e| anyhow!("SMTP 发送失败：{e}"))?;
+    let msg = builder
+        .multipart(body)
+        .with_context(|| i18n::t("err.email.build_message_failed"))?;
+    transport.send(msg).await.map_err(|e| {
+        anyhow!(i18n::t_var(
+            "err.email.smtp_send_failed",
+            &[("err", &e.to_string())]
+        ))
+    })?;
     Ok(())
 }
 
 /// 测试 SMTP 连接（不发送任何邮件）。
 pub async fn test_smtp(cfg: &SmtpConfig) -> Result<String> {
     if cfg.host.trim().is_empty() {
-        return Err(anyhow!("SMTP host 未配置"));
+        return Err(anyhow!(i18n::t("err.email.no_host")));
     }
     let transport = build_transport(cfg)?;
     let ok = transport.test_connection().await.map_err(|e| {
-        anyhow!("SMTP 连接失败：{e}\n常见原因：密码/授权码错误、被防火墙拦截、端口与加密方式不匹配")
+        anyhow!(i18n::t_var(
+            "err.email.smtp_connect_failed",
+            &[("err", &e.to_string())],
+        ))
     })?;
     if !ok {
-        return Err(anyhow!("SMTP 服务器未响应有效问候"));
+        return Err(anyhow!(i18n::t("err.email.smtp_no_greeting")));
     }
-    Ok(format!(
-        "✓ SMTP 连接成功：{}:{}（{}）",
-        cfg.host,
-        cfg.port,
-        if cfg.use_ssl { "SSL/TLS" } else { "STARTTLS" }
+    let enc = if cfg.use_ssl { "SSL/TLS" } else { "STARTTLS" };
+    let port = cfg.port.to_string();
+    Ok(i18n::t_var(
+        "msg.smtp_conn_ok",
+        &[
+            ("host", cfg.host.as_str()),
+            ("port", port.as_str()),
+            ("enc", enc),
+        ],
     ))
 }
 
@@ -135,7 +147,12 @@ fn build_transport(cfg: &SmtpConfig) -> Result<AsyncSmtpTransport<Tokio1Executor
     } else {
         AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&cfg.host)
     }
-    .map_err(|e| anyhow!("构造 SMTP 传输失败：{e}"))?;
+    .map_err(|e| {
+        anyhow!(i18n::t_var(
+            "err.email.smtp_transport_failed",
+            &[("err", &e.to_string())]
+        ))
+    })?;
     let creds = Credentials::new(cfg.username.clone(), cfg.password.clone());
     Ok(builder.port(cfg.port).credentials(creds).build())
 }
@@ -150,8 +167,12 @@ fn parse_from(cfg: &SmtpConfig) -> Result<Mailbox> {
 }
 
 fn parse_mailbox(s: &str) -> Result<Mailbox> {
-    s.parse::<Mailbox>()
-        .map_err(|e| anyhow!("无效邮箱地址 \"{s}\"：{e}"))
+    s.parse::<Mailbox>().map_err(|e| {
+        anyhow!(i18n::t_var(
+            "err.email.invalid_address",
+            &[("addr", s), ("err", &e.to_string())],
+        ))
+    })
 }
 
 // ============================================================
@@ -331,9 +352,10 @@ fn replace_pair(s: &str, delim: &str, open: &str, close: &str) -> String {
 
 /// 用极简 inline CSS 包裹 body，适配 Gmail / iOS Mail 等主流客户端。
 fn wrap_html(body: &str) -> String {
+    let lang = i18n::current_language();
     format!(
         "<!doctype html>
-<html lang=\"zh-CN\"><head>
+<html lang=\"{lang}\"><head>
 <meta charset=\"utf-8\">
 <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">
 <style>
