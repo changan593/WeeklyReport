@@ -146,7 +146,7 @@ export function Input({ value, onChange, placeholder, type = 'text', disabled, c
       onChange={(e) => onChange?.(e.target.value)}
       placeholder={placeholder}
       disabled={disabled}
-      className={`rounded border border-stone-200 bg-white px-2.5 py-1.5 text-[13px] text-stone-900 focus:border-stone-400 disabled:bg-stone-50 disabled:text-stone-400 ${className}`}
+      className={`w-full rounded border border-stone-200 bg-white px-2.5 py-1.5 text-[13px] text-stone-900 focus:border-stone-400 disabled:bg-stone-50 disabled:text-stone-400 ${className}`}
     />
   );
 }
@@ -172,7 +172,7 @@ export function Textarea({ value, onChange, placeholder, rows = 4, disabled, cla
       placeholder={placeholder}
       rows={rows}
       disabled={disabled}
-      className={`rounded border border-stone-200 bg-white px-2.5 py-1.5 text-[13px] text-stone-900 focus:border-stone-400 disabled:bg-stone-50 disabled:text-stone-400 ${className}`}
+      className={`w-full rounded border border-stone-200 bg-white px-2.5 py-1.5 text-[13px] text-stone-900 focus:border-stone-400 disabled:bg-stone-50 disabled:text-stone-400 ${className}`}
     />
   );
 }
@@ -183,7 +183,7 @@ export function Select({ value, onChange, children, disabled, className = '' }) 
       value={value ?? ''}
       onChange={(e) => onChange?.(e.target.value)}
       disabled={disabled}
-      className={`rounded border border-stone-200 bg-white px-2.5 py-1.5 text-[13px] text-stone-900 focus:border-stone-400 disabled:bg-stone-50 disabled:text-stone-400 ${className}`}
+      className={`w-full rounded border border-stone-200 bg-white px-2.5 py-1.5 text-[13px] text-stone-900 focus:border-stone-400 disabled:bg-stone-50 disabled:text-stone-400 ${className}`}
     >
       {children}
     </select>
@@ -265,7 +265,7 @@ export function ModalHeader({ title, onClose }) {
 
 export function ModalBody({ children, className = '' }) {
   return (
-    <div className={`max-h-[60vh] overflow-y-auto px-5 py-4 ${className}`}>{children}</div>
+    <div className={`max-h-[72vh] overflow-y-auto px-5 py-4 ${className}`}>{children}</div>
   );
 }
 

@@ -93,6 +93,9 @@ pub struct LogItem {
     pub text: String,
     /// `"claude-code"` / `"codex"` / `"manual"`
     pub source: String,
+    /// 来源 workspace 名（= `Message.server`，用户给工作区起的名）。手动新增条目为空。
+    #[serde(default)]
+    pub server: String,
     /// 用户手动新增的（不来自日志）
     #[serde(default)]
     pub manual: bool,
@@ -298,6 +301,7 @@ pub fn aggregate_with_stats(mut messages: Vec<Message>, parse_stats: ParseStats)
                     id: Uuid::new_v4().to_string(),
                     timestamp: m.ts.map(|t| t.to_rfc3339()),
                     source: m.tool.as_str().to_string(),
+                    server: m.server.clone(),
                     text: m.text,
                     manual: false,
                 };

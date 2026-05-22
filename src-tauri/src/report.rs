@@ -478,6 +478,7 @@ mod tests {
             id: "test-id".into(),
             timestamp: Some("2026-05-17T10:00:00+08:00".into()),
             source: "claude-code".into(),
+            server: "本机".into(),
             text: text.into(),
             manual: false,
         }
