@@ -10,12 +10,15 @@ use anyhow::{anyhow, bail, Result};
 use chrono::Local;
 use serde::{Deserialize, Serialize};
 
+use std::collections::HashMap;
+
 use crate::email;
 use crate::llm::{self, LlmProvider};
 use crate::logs::{self, LogItem, ParseStats, Summary};
+use crate::projectdocs;
 use crate::state;
 use crate::store;
-use crate::workspace::Workspace;
+use crate::workspace::{Workspace, WorkspaceKind};
 
 // ============================================================
 // 数据模型
@@ -112,16 +115,31 @@ pub async fn collect_summary(workspace_ids: &[String], days: u32) -> Result<Coll
 
     let mut messages = Vec::new();
     let mut parse_stats = ParseStats::default();
+    // 项目名 → 根目录 md 文档合并文本，作为 LLM 的项目背景
+    let mut project_docs: HashMap<String, String> = HashMap::new();
     for ws in &workspaces {
         match logs::collect_messages(ws, days, clip).await {
             Ok((part, s)) => {
+                // 本机 workspace：读各项目根目录的 md 文档作背景。
+                // SSH workspace 的项目文件在远端，读取在 PR #8c 接入。
+                if ws.kind == WorkspaceKind::Local {
+                    for (project, path) in logs::project_paths_of(&part) {
+                        if project_docs.contains_key(&project) {
+                            continue;
+                        }
+                        if let Some(doc) = projectdocs::read_local_project_docs(&path) {
+                            project_docs.insert(project, doc);
+                        }
+                    }
+                }
                 messages.extend(part);
                 parse_stats.merge(&s);
             }
             Err(e) => tracing::warn!("workspace {} 收集日志失败: {:#}", ws.name, e),
         }
     }
-    let summary = logs::aggregate_with_stats(messages, parse_stats);
+    let mut summary = logs::aggregate_with_stats(messages, parse_stats);
+    summary.project_docs = project_docs;
     Ok(CollectionOutput {
         skipped_lines: summary.stats.skipped_lines,
         skipped_files: summary.stats.skipped_files,
@@ -305,6 +323,19 @@ pub fn build_prompt(summary: &Summary, template: &Template, past_reports: &[Stri
     }
     out.push('\n');
 
+    // 项目背景文档（如有）：放工作日志前，让 LLM 先理解项目用途、技术栈、领域术语
+    if !summary.project_docs.is_empty() {
+        out.push_str("# 项目背景\n");
+        out.push_str("以下是相关项目根目录的说明文档，帮助你理解项目用途、技术栈与领域术语：\n");
+        out.push_str("<project_docs>\n");
+        let mut docs: Vec<(&String, &String)> = summary.project_docs.iter().collect();
+        docs.sort_by(|a, b| a.0.cmp(b.0));
+        for (project, doc) in docs {
+            out.push_str(&format!("【{project}】\n{doc}\n\n"));
+        }
+        out.push_str("</project_docs>\n\n");
+    }
+
     // 用户工作指令分组（按指令数从多到少排序，便于 LLM 优先处理重点项目）
     // 每条带 [YYYY-MM-DD] 日期前缀，让 LLM 可按时间组织叙述
     out.push_str("# 工作日志（按项目分组，已用户编辑确认）\n");
@@ -453,6 +484,7 @@ mod tests {
         Summary {
             by_project,
             project_paths: HashMap::new(),
+            project_docs: HashMap::new(),
             ai_snippets: vec![],
             stats: SummaryStats {
                 total_prompts: 3,
@@ -547,6 +579,25 @@ mod tests {
         assert!(p.contains("禁止用语"));
         assert!(p.contains("做了一些工作"));
         assert!(p.contains("修复了若干 bug"));
+    }
+
+    #[test]
+    fn prompt_includes_project_docs_when_present() {
+        let mut s = sample_summary();
+        s.project_docs.insert(
+            "weekly-report".into(),
+            "### README.md\n这是周报生成项目".into(),
+        );
+        let p = build_prompt(&s, &tech_template(), &[]);
+        assert!(p.contains("# 项目背景"));
+        assert!(p.contains("<project_docs>"));
+        assert!(p.contains("这是周报生成项目"));
+    }
+
+    #[test]
+    fn prompt_omits_project_docs_section_when_empty() {
+        let p = build_prompt(&sample_summary(), &tech_template(), &[]);
+        assert!(!p.contains("# 项目背景"));
     }
 
     #[test]
