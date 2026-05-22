@@ -107,6 +107,10 @@ pub struct Summary {
     /// 同名项目有多个 cwd 时取出现次数最多的。
     #[serde(default)]
     pub project_paths: HashMap<String, String>,
+    /// 项目名 → 项目根目录 md 文档合并文本（README 等）。作为 LLM 的项目背景。
+    /// 由 `collect_summary` 在聚合后填充；`aggregate` 本身不读文件，留空。
+    #[serde(default)]
+    pub project_docs: HashMap<String, String>,
     /// 少量助手回复片段（≤ 10 条），用于让 LLM 把握风格
     pub ai_snippets: Vec<String>,
     pub stats: SummaryStats,
@@ -347,9 +351,26 @@ pub fn aggregate_with_stats(mut messages: Vec<Message>, parse_stats: ParseStats)
     Summary {
         by_project,
         project_paths,
+        project_docs: HashMap::new(),
         ai_snippets,
         stats,
     }
+}
+
+/// 从一批 Message 提取 项目名 → 真实路径（每个项目取第一个非空 path）。
+///
+/// 与 `Summary.project_paths` 的区别：这个不做投票，直接取首个，
+/// 用于 `collect_summary` 按 workspace 即时读 md（同 workspace 内路径基本一致）。
+pub fn project_paths_of(messages: &[Message]) -> HashMap<String, String> {
+    let mut out: HashMap<String, String> = HashMap::new();
+    for m in messages {
+        if let Some(p) = &m.project_path {
+            if !p.trim().is_empty() {
+                out.entry(m.project.clone()).or_insert_with(|| p.clone());
+            }
+        }
+    }
+    out
 }
 
 // ============================================================

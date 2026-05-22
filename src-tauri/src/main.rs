@@ -7,6 +7,7 @@ mod email;
 mod i18n;
 mod llm;
 mod logs;
+mod projectdocs;
 mod report;
 mod scheduler;
 mod ssh;
