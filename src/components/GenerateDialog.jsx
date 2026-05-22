@@ -181,10 +181,10 @@ export default function GenerateDialog({ onClose, onGenerated }) {
     });
   }
 
-  function updateItemText(projectName, itemId, newText) {
+  function updateItem(projectName, itemId, patch) {
     setCollection((prev) => {
       const items = prev.summary.by_project[projectName].map((it) =>
-        it.id === itemId ? { ...it, text: newText } : it,
+        it.id === itemId ? { ...it, ...patch } : it,
       );
       return {
         ...prev,
@@ -367,7 +367,7 @@ export default function GenerateDialog({ onClose, onGenerated }) {
             draftSavedAt={draftSavedAt}
             onToggleItem={toggleSelected}
             onToggleProject={toggleProjectAll}
-            onUpdateText={updateItemText}
+            onUpdateText={updateItem}
             onDeleteItem={deleteItem}
             onAddItem={addItem}
             onUpdateDoc={updateProjectDoc}
@@ -668,7 +668,7 @@ function ReviewStep({
               selectedIds={selectedIds}
               onToggleItem={onToggleItem}
               onToggleAll={() => onToggleProject(name)}
-              onUpdateText={(id, text) => onUpdateText(name, id, text)}
+              onUpdateText={(id, patch) => onUpdateText(name, id, patch)}
               onDeleteItem={(id) => onDeleteItem(name, id)}
               onAddItem={(text) => onAddItem(name, text)}
               onUpdateDoc={(text) => onUpdateDoc(name, text)}
@@ -737,7 +737,7 @@ function ProjectSection({
               item={it}
               selected={selectedIds.has(it.id)}
               onToggle={() => onToggleItem(it.id)}
-              onUpdate={(text) => onUpdateText(it.id, text)}
+              onUpdate={(patch) => onUpdateText(it.id, patch)}
               onDelete={() => onDeleteItem(it.id)}
             />
           ))}
@@ -841,14 +841,19 @@ function ItemRow({ item, selected, onToggle, onUpdate, onDelete }) {
   const { t } = useTranslation();
   const [editing, setEditing] = useState(false);
   const [draftText, setDraftText] = useState(item.text);
+  const [draftReply, setDraftReply] = useState(item.reply ?? '');
+  const hasReply = item.reply != null;
 
   function saveEdit() {
-    onUpdate(draftText);
+    const patch = { text: draftText };
+    if (hasReply) patch.reply = draftReply;
+    onUpdate(patch);
     setEditing(false);
   }
 
   function cancelEdit() {
     setDraftText(item.text);
+    setDraftReply(item.reply ?? '');
     setEditing(false);
   }
 
@@ -881,6 +886,14 @@ function ItemRow({ item, selected, onToggle, onUpdate, onDelete }) {
         {editing ? (
           <div className="mt-1 space-y-1.5">
             <Textarea value={draftText} onChange={setDraftText} rows={3} />
+            {hasReply && (
+              <div className="space-y-0.5">
+                <div className="text-[11px] text-stone-400">
+                  {t('generate.review.ai_reply')}
+                </div>
+                <Textarea value={draftReply} onChange={setDraftReply} rows={3} />
+              </div>
+            )}
             <div className="flex gap-1.5">
               <PrimaryButton onClick={saveEdit}>{t('generate.actions.save_edit')}</PrimaryButton>
               <SecondaryButton onClick={cancelEdit}>
@@ -889,9 +902,17 @@ function ItemRow({ item, selected, onToggle, onUpdate, onDelete }) {
             </div>
           </div>
         ) : (
-          <p className="mt-0.5 whitespace-pre-wrap break-words text-[12.5px] text-stone-700">
-            {item.text}
-          </p>
+          <>
+            <p className="mt-0.5 whitespace-pre-wrap break-words text-[12.5px] text-stone-700">
+              {item.text}
+            </p>
+            {item.reply && (
+              <p className="mt-1 whitespace-pre-wrap break-words rounded bg-stone-50 px-2 py-1 text-[11.5px] text-stone-500">
+                <span className="text-stone-400">{t('generate.review.ai_reply')}：</span>
+                {item.reply}
+              </p>
+            )}
+          </>
         )}
       </div>
       {!editing && (
