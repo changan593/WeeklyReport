@@ -120,15 +120,30 @@ pub async fn collect_summary(workspace_ids: &[String], days: u32) -> Result<Coll
     for ws in &workspaces {
         match logs::collect_messages(ws, days, clip).await {
             Ok((part, s)) => {
-                // 本机 workspace：读各项目根目录的 md 文档作背景。
-                // SSH workspace 的项目文件在远端，读取在 PR #8c 接入。
-                if ws.kind == WorkspaceKind::Local {
-                    for (project, path) in logs::project_paths_of(&part) {
-                        if project_docs.contains_key(&project) {
-                            continue;
+                // 读各项目根目录的 md 文档作背景：
+                // 本机直接读文件系统；SSH 用 ssh+tar 把项目根的 *.md 拉到缓存再读。
+                let ws_paths = logs::project_paths_of(&part);
+                match ws.kind {
+                    WorkspaceKind::Local => {
+                        for (project, path) in ws_paths {
+                            if project_docs.contains_key(&project) {
+                                continue;
+                            }
+                            if let Some(doc) = projectdocs::read_local_project_docs(&path) {
+                                project_docs.insert(project, doc);
+                            }
                         }
-                        if let Some(doc) = projectdocs::read_local_project_docs(&path) {
-                            project_docs.insert(project, doc);
+                    }
+                    WorkspaceKind::Ssh => {
+                        match crate::ssh::sync_project_docs(ws, &ws_paths).await {
+                            Ok(docs) => {
+                                for (project, doc) in docs {
+                                    project_docs.entry(project).or_insert(doc);
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!("workspace {} 读项目 md 失败: {:#}", ws.name, e)
+                            }
                         }
                     }
                 }

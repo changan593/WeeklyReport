@@ -171,29 +171,73 @@ pub async fn sync_to_cache(ws: &Workspace) -> Result<HashMap<String, PathBuf>> {
         let remote = ws.claude_path.as_deref().unwrap_or("~/.claude");
         let local = root.join("claude");
         std::fs::create_dir_all(&local)?;
-        tar_pull_jsonl(ws, remote, &local).await?;
+        tar_pull(ws, remote, &local, "*.jsonl", None).await?;
         out.insert("claude-code".into(), local);
     }
     if ws.tools.iter().any(|t| t == "codex") {
         let remote = ws.codex_path.as_deref().unwrap_or("~/.codex");
         let local = root.join("codex");
         std::fs::create_dir_all(&local)?;
-        tar_pull_jsonl(ws, remote, &local).await?;
+        tar_pull(ws, remote, &local, "*.jsonl", None).await?;
         out.insert("codex".into(), local);
     }
     Ok(out)
 }
 
-/// 构造远端 shell 命令：进入 `remote` 目录，用 `find` 选出所有 `*.jsonl`，交给
-/// `tar` 打包到 stdout（被 ssh channel 转发到本地 stdout）。
+/// 把一批远端项目根目录的 `*.md` 文档拉到本地缓存并读出。
 ///
-/// 命令结构：`cd <quoted> && find . -name '*.jsonl' -print0 | tar --null -cf - -T -`
+/// `project_paths`：项目名 → 远端项目真实路径（cwd）。
+/// 返回 项目名 → md 合并文本。单个项目失败（无 md / 路径不存在 / ssh 错误）
+/// 只 `warn!` 后跳过，不阻塞其他项目。
+pub async fn sync_project_docs(
+    ws: &Workspace,
+    project_paths: &HashMap<String, String>,
+) -> Result<HashMap<String, String>> {
+    require_ssh(ws)?;
+    if ws.auth_method == SshAuthMethod::Password {
+        require_password_if_needed(ws)?;
+        ensure_sshpass_installed().await?;
+    }
+
+    let docs_root = cache_root(&ws.id)?.join("project_docs");
+    let mut out = HashMap::new();
+    // 用序号作子目录名，避免项目名含特殊字符
+    for (idx, (project, remote_path)) in project_paths.iter().enumerate() {
+        let local = docs_root.join(format!("p{idx}"));
+        if let Err(e) = std::fs::create_dir_all(&local) {
+            tracing::warn!("创建项目文档缓存目录失败 {}: {e}", local.display());
+            continue;
+        }
+        // 只拉项目根目录层（maxdepth 1）的 *.md
+        match tar_pull(ws, remote_path, &local, "*.md", Some(1)).await {
+            Ok(()) => {
+                if let Some(local_str) = local.to_str() {
+                    if let Some(doc) = crate::projectdocs::read_local_project_docs(local_str) {
+                        out.insert(project.clone(), doc);
+                    }
+                }
+            }
+            Err(e) => tracing::warn!("拉取项目 {project} 的 md 文档失败: {e:#}"),
+        }
+    }
+    Ok(out)
+}
+
+/// 构造远端 shell 命令：进入 `remote` 目录，用 `find` 选出匹配 `pattern` 的文件，
+/// 交给 `tar` 打包到 stdout（被 ssh channel 转发到本地 stdout）。
+///
+/// 命令结构：`cd <quoted> && find . [-maxdepth N] -name '<pattern>' -print0 | tar --null -cf - -T -`
 /// - `cd` 后 `find .` 用相对路径，让 archive 中的文件路径相对 remote 根
 /// - `find -print0` + `tar --null -T -` 用 NUL 分隔，安全处理含空格/特殊字符的文件名
 /// - 远端路径走 [`sh_quote_remote_path`] 转义，抵御命令注入
-fn build_remote_tar_cmd(remote: &str) -> String {
+/// - `pattern` 是代码内部常量（`*.jsonl` / `*.md`），非用户输入，可直接拼接
+/// - `maxdepth = Some(1)` 限制只取目录根层（读项目根目录 md 文档用）
+fn build_remote_tar_cmd(remote: &str, pattern: &str, maxdepth: Option<u32>) -> String {
+    let depth = maxdepth
+        .map(|d| format!("-maxdepth {d} "))
+        .unwrap_or_default();
     format!(
-        "cd {} && find . -name '*.jsonl' -print0 | tar --null -cf - -T -",
+        "cd {} && find . {depth}-name '{pattern}' -print0 | tar --null -cf - -T -",
         sh_quote_remote_path(remote)
     )
 }
@@ -230,12 +274,20 @@ fn local_tar_command() -> Command {
 
 /// 远端 `ssh + tar c` 打包 → 本地 `tar x` 解包，单向流式同步。
 ///
+/// 把 `remote` 目录下匹配 `pattern` 的文件拉到本地 `local`。
+///
 /// 相较 rsync：
 /// - 只用单向 stdio（ssh.stdout → tar.stdin），不依赖 rsync 协议的双向握手，
 ///   避开 Windows 上 MSYS2 rsync ↔ Win32 OpenSSH 的 pipe 不兼容（详见
 ///   `docs/DECISIONS.md#adr-013`）
-/// - 全量同步而非增量；对 jsonl 日志（典型 <10MB/工作区）代价可忽略
-async fn tar_pull_jsonl(ws: &Workspace, remote: &str, local: &Path) -> Result<()> {
+/// - 全量同步而非增量；对 jsonl 日志 / md 文档（体积小）代价可忽略
+async fn tar_pull(
+    ws: &Workspace,
+    remote: &str,
+    local: &Path,
+    pattern: &str,
+    maxdepth: Option<u32>,
+) -> Result<()> {
     let user = ws.user.as_deref().unwrap_or("root");
     let host = ws.host.as_deref().unwrap_or_default();
     let local_str = local.to_str().ok_or_else(|| {
@@ -248,7 +300,7 @@ async fn tar_pull_jsonl(ws: &Workspace, remote: &str, local: &Path) -> Result<()
     // 1. 启动 ssh：远端跑 tar c，stdout 接 Rust 创建的 pipe
     let mut ssh_cmd = build_ssh_command(ws)?;
     ssh_cmd.arg(format!("{user}@{host}"));
-    ssh_cmd.arg(build_remote_tar_cmd(remote));
+    ssh_cmd.arg(build_remote_tar_cmd(remote, pattern, maxdepth));
     ssh_cmd.stdin(Stdio::null());
     ssh_cmd.stdout(Stdio::piped());
     ssh_cmd.stderr(Stdio::piped());
@@ -577,7 +629,7 @@ mod tests {
 
     #[test]
     fn remote_tar_cmd_uses_relative_path_after_cd() {
-        let s = build_remote_tar_cmd("/home/alice/.claude");
+        let s = build_remote_tar_cmd("/home/alice/.claude", "*.jsonl", None);
         // cd 之后 find 必须用 `.` 相对路径，让 archive 路径相对 remote 根
         assert!(s.contains("cd '/home/alice/.claude'"));
         assert!(s.contains("find . -name '*.jsonl' -print0"));
@@ -587,19 +639,27 @@ mod tests {
     #[test]
     fn remote_tar_cmd_expands_tilde_via_home() {
         // ~/.claude 必须被 sh_quote_remote_path 转为 "$HOME"'/.claude'
-        let s = build_remote_tar_cmd("~/.claude");
+        let s = build_remote_tar_cmd("~/.claude", "*.jsonl", None);
         assert!(s.contains("cd \"$HOME\"'/.claude'"));
     }
 
     #[test]
     fn remote_tar_cmd_neutralizes_injection() {
         // 攻击者填的 remote_path：闭合引号 + 注入 rm
-        let s = build_remote_tar_cmd("~/foo'; rm -rf ~ #");
+        let s = build_remote_tar_cmd("~/foo'; rm -rf ~ #", "*.jsonl", None);
         // 注入字符必须全部留在单引号内，find / tar 段照样在
         assert!(s.contains("find . -name '*.jsonl' -print0"));
         assert!(s.contains("rm -rf"));
         // cd 段必须以 "$HOME" 开头（家目录展开），整个尾段在单引号里
         assert!(s.contains("cd \"$HOME\""));
+    }
+
+    #[test]
+    fn remote_tar_cmd_supports_maxdepth_and_md_pattern() {
+        // 读项目根目录 md 用：maxdepth 1 + *.md
+        let s = build_remote_tar_cmd("/proj", "*.md", Some(1));
+        assert!(s.contains("find . -maxdepth 1 -name '*.md' -print0"));
+        assert!(s.contains("cd '/proj'"));
     }
 
     #[test]
