@@ -222,6 +222,7 @@ export default function GenerateDialog({ onClose, onGenerated }) {
       timestamp: new Date().toISOString(),
       text: trimmed,
       source: 'manual',
+      server: '',
       manual: true,
     };
     setCollection((prev) => {
@@ -328,7 +329,7 @@ export default function GenerateDialog({ onClose, onGenerated }) {
   }
 
   return (
-    <Modal onClose={onClose} width="max-w-3xl">
+    <Modal onClose={onClose} width={step === 'review' ? 'max-w-5xl' : 'max-w-3xl'}>
       <ModalHeader title={t('generate.title')} onClose={onClose} />
       <ModalBody className="space-y-4">
         {bootError && <ErrorBox message={bootError} />}
@@ -873,6 +874,9 @@ function ItemRow({ item, selected, onToggle, onUpdate, onDelete }) {
         <div className="flex flex-wrap gap-x-2 gap-y-0.5 text-[11px] text-stone-400">
           {timeLabel && <span>{timeLabel}</span>}
           <span className={`rounded px-1 ${sourceClass}`}>{sourceLabel}</span>
+          {item.server && (
+            <span className="rounded bg-stone-100 px-1 text-stone-600">{item.server}</span>
+          )}
         </div>
         {editing ? (
           <div className="mt-1 space-y-1.5">
