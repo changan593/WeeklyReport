@@ -123,6 +123,9 @@ pub(crate) fn parse_history_line(line: &str, server: &str) -> Option<Message> {
         text,
         ts,
         project,
+        // history.jsonl 的 project 字段是编码串（`-Users-me-app`），
+        // 无法可靠还原成真实路径 → project_path 留 None
+        project_path: None,
         tool: Tool::ClaudeCode,
         server: server.to_string(),
     })
@@ -148,16 +151,16 @@ fn parse_session_file(
         }
     };
 
-    // 第一遍：找 cwd 作为 project 名。
-    let project = content
+    // 第一遍：找 cwd。完整 cwd 留作 project_path，basename 作 project 名。
+    let cwd_full: Option<String> = content
         .lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .find_map(|v| v.get("cwd").and_then(|c| c.as_str()).map(path_basename))
-        .unwrap_or_else(|| {
-            path.file_stem()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_default()
-        });
+        .find_map(|v| v.get("cwd").and_then(|c| c.as_str()).map(|s| s.to_string()));
+    let project = cwd_full.as_deref().map(path_basename).unwrap_or_else(|| {
+        path.file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    });
 
     // 第二遍：按行解析。
     let mut messages = Vec::new();
@@ -171,7 +174,7 @@ fn parse_session_file(
             stats.skipped_lines += 1;
             continue;
         }
-        for m in parse_session_line(line, server, &project, clip_chars) {
+        for m in parse_session_line(line, server, &project, cwd_full.as_deref(), clip_chars) {
             if m.ts.map_or(true, |ts| ts >= since) {
                 messages.push(m);
             }
@@ -188,6 +191,7 @@ pub(crate) fn parse_session_line(
     line: &str,
     server: &str,
     project: &str,
+    project_path: Option<&str>,
     clip_chars: usize,
 ) -> Vec<Message> {
     let line = line.trim();
@@ -206,8 +210,8 @@ pub(crate) fn parse_session_line(
     let t = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
 
     match t {
-        "user" => parse_user_line(&v, server, project, ts),
-        "assistant" => parse_assistant_line(&v, server, project, ts, clip_chars),
+        "user" => parse_user_line(&v, server, project, project_path, ts),
+        "assistant" => parse_assistant_line(&v, server, project, project_path, ts, clip_chars),
         // summary / git-commit / 其他未知 type 全部丢弃
         _ => Vec::new(),
     }
@@ -222,6 +226,7 @@ fn parse_user_line(
     v: &Value,
     server: &str,
     project: &str,
+    project_path: Option<&str>,
     ts: Option<DateTime<Local>>,
 ) -> Vec<Message> {
     if v.get("toolUseResult").is_some() {
@@ -246,6 +251,7 @@ fn parse_user_line(
         text,
         ts,
         project: project.to_string(),
+        project_path: project_path.map(String::from),
         tool: Tool::ClaudeCode,
         server: server.to_string(),
     }]
@@ -257,6 +263,7 @@ fn parse_assistant_line(
     v: &Value,
     server: &str,
     project: &str,
+    project_path: Option<&str>,
     ts: Option<DateTime<Local>>,
     clip_chars: usize,
 ) -> Vec<Message> {
@@ -291,6 +298,7 @@ fn parse_assistant_line(
         text: clipped,
         ts,
         project: project.to_string(),
+        project_path: project_path.map(String::from),
         tool: Tool::ClaudeCode,
         server: server.to_string(),
     }]
@@ -335,7 +343,7 @@ mod tests {
 
     fn parse_session_lines(text: &str, project: &str) -> Vec<Message> {
         text.lines()
-            .flat_map(|l| parse_session_line(l, "test-srv", project, 200))
+            .flat_map(|l| parse_session_line(l, "test-srv", project, None, 200))
             .collect()
     }
 
@@ -427,33 +435,33 @@ mod tests {
     fn tool_result_array_content_dropped() {
         // type:"user" + message.content 是数组（即使没有 toolUseResult）也算 tool result
         let line = r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"x","content":"out"}]},"timestamp":"2026-05-17T10:00:00Z"}"#;
-        let msgs = parse_session_line(line, "srv", "p", 200);
+        let msgs = parse_session_line(line, "srv", "p", None, 200);
         assert!(msgs.is_empty());
     }
 
     #[test]
     fn ismeta_user_dropped() {
         let line = r#"{"type":"user","isMeta":true,"message":{"role":"user","content":"系统提示"},"timestamp":"2026-05-17T10:00:00Z"}"#;
-        let msgs = parse_session_line(line, "srv", "p", 200);
+        let msgs = parse_session_line(line, "srv", "p", None, 200);
         assert!(msgs.is_empty());
     }
 
     #[test]
     fn unknown_type_silently_dropped() {
         let line = r#"{"type":"summary","summary":"会话摘要","timestamp":"2026-05-17T10:00:00Z"}"#;
-        let msgs = parse_session_line(line, "srv", "p", 200);
+        let msgs = parse_session_line(line, "srv", "p", None, 200);
         assert!(msgs.is_empty());
 
         let line = r#"{"type":"git-commit","timestamp":"2026-05-17T10:00:00Z"}"#;
-        let msgs = parse_session_line(line, "srv", "p", 200);
+        let msgs = parse_session_line(line, "srv", "p", None, 200);
         assert!(msgs.is_empty());
     }
 
     #[test]
     fn broken_line_silently_dropped() {
-        let msgs = parse_session_line("{ broken", "srv", "p", 200);
+        let msgs = parse_session_line("{ broken", "srv", "p", None, 200);
         assert!(msgs.is_empty());
-        let msgs = parse_session_line("", "srv", "p", 200);
+        let msgs = parse_session_line("", "srv", "p", None, 200);
         assert!(msgs.is_empty());
     }
 

@@ -70,6 +70,10 @@ pub struct Message {
     pub text: String,
     pub ts: Option<DateTime<Local>>,
     pub project: String,
+    /// 项目真实路径（cwd）。来自 Claude session / Codex 日志时是完整路径；
+    /// 来自 Claude `history.jsonl` 时为 `None`（该文件只存编码过的 project 名，
+    /// 无法可靠还原成真实路径）。用于后续读取项目根目录的 md 文档作背景。
+    pub project_path: Option<String>,
     pub tool: Tool,
     pub server: String,
 }
@@ -99,6 +103,10 @@ pub struct LogItem {
 pub struct Summary {
     /// 项目名 → 工作指令条目列表（已按时序排序、相邻去重）
     pub by_project: HashMap<String, Vec<LogItem>>,
+    /// 项目名 → 真实路径（cwd）。仅含能确定路径的项目；用于读项目 md 文档。
+    /// 同名项目有多个 cwd 时取出现次数最多的。
+    #[serde(default)]
+    pub project_paths: HashMap<String, String>,
     /// 少量助手回复片段（≤ 10 条），用于让 LLM 把握风格
     pub ai_snippets: Vec<String>,
     pub stats: SummaryStats,
@@ -253,6 +261,8 @@ pub fn aggregate_with_stats(mut messages: Vec<Message>, parse_stats: ParseStats)
     let mut active_days: BTreeSet<String> = BTreeSet::new();
     let mut last_text_per_project: HashMap<String, String> = HashMap::new();
     let mut total_prompts: u32 = 0;
+    // 每个项目的 cwd 投票：project → (path → 出现次数)；同名项目取票数最高的路径
+    let mut path_votes: HashMap<String, HashMap<String, u32>> = HashMap::new();
 
     // assistant snippets：先全收集，最后按 ts 排序取最新
     let mut assistant_pool: Vec<(Option<DateTime<Local>>, String)> = Vec::new();
@@ -262,6 +272,15 @@ pub fn aggregate_with_stats(mut messages: Vec<Message>, parse_stats: ParseStats)
         tools.insert(m.tool.as_str().to_string());
         if let Some(ts) = m.ts {
             active_days.insert(ts.format("%Y-%m-%d").to_string());
+        }
+        if let Some(pp) = &m.project_path {
+            if !pp.trim().is_empty() {
+                *path_votes
+                    .entry(m.project.clone())
+                    .or_default()
+                    .entry(pp.clone())
+                    .or_default() += 1;
+            }
         }
         match m.role {
             Role::User => {
@@ -303,6 +322,17 @@ pub fn aggregate_with_stats(mut messages: Vec<Message>, parse_stats: ParseStats)
         .max_by_key(|(_, v)| v.len())
         .map(|(k, _)| k.clone());
 
+    // 每个项目取票数最高的 cwd 作为代表路径
+    let project_paths: HashMap<String, String> = path_votes
+        .into_iter()
+        .filter_map(|(project, votes)| {
+            votes
+                .into_iter()
+                .max_by_key(|(_, c)| *c)
+                .map(|(path, _)| (project, path))
+        })
+        .collect();
+
     let stats = SummaryStats {
         total_prompts,
         active_days: active_days.len() as u32,
@@ -316,6 +346,7 @@ pub fn aggregate_with_stats(mut messages: Vec<Message>, parse_stats: ParseStats)
 
     Summary {
         by_project,
+        project_paths,
         ai_snippets,
         stats,
     }
@@ -392,6 +423,20 @@ mod tests {
             text: text.to_string(),
             ts: Some(Local::now() - Duration::days(day_offset)),
             project: project.to_string(),
+            project_path: None,
+            tool: Tool::ClaudeCode,
+            server: "本机".to_string(),
+        }
+    }
+
+    /// 带 project_path 的 Message 构造（测 project_paths 聚合用）。
+    fn msg_with_path(project: &str, path: &str, text: &str) -> Message {
+        Message {
+            role: Role::User,
+            text: text.to_string(),
+            ts: Some(Local::now()),
+            project: project.to_string(),
+            project_path: Some(path.to_string()),
             tool: Tool::ClaudeCode,
             server: "本机".to_string(),
         }
@@ -521,8 +566,40 @@ mod tests {
         let s = aggregate(Vec::new());
         assert!(s.by_project.is_empty());
         assert!(s.ai_snippets.is_empty());
+        assert!(s.project_paths.is_empty());
         assert_eq!(s.stats.total_prompts, 0);
         assert_eq!(s.stats.main_project, None);
+    }
+
+    #[test]
+    fn aggregate_collects_project_paths() {
+        let msgs = vec![
+            msg_with_path("app", "/home/me/app", "做 A"),
+            msg_with_path("app", "/home/me/app", "做 B"),
+            msg(Role::User, "noPath", "无路径项目", 0),
+        ];
+        let s = aggregate(msgs);
+        assert_eq!(
+            s.project_paths.get("app").map(String::as_str),
+            Some("/home/me/app")
+        );
+        // 无 project_path 的项目不进 project_paths
+        assert!(!s.project_paths.contains_key("noPath"));
+    }
+
+    #[test]
+    fn aggregate_project_path_picks_most_voted() {
+        // 同名项目有两个不同 cwd，取出现次数多的
+        let msgs = vec![
+            msg_with_path("app", "/path/a", "x1"),
+            msg_with_path("app", "/path/a", "x2"),
+            msg_with_path("app", "/path/b", "x3"),
+        ];
+        let s = aggregate(msgs);
+        assert_eq!(
+            s.project_paths.get("app").map(String::as_str),
+            Some("/path/a")
+        );
     }
 
     #[test]

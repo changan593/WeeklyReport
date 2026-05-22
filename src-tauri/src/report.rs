@@ -452,6 +452,7 @@ mod tests {
         );
         Summary {
             by_project,
+            project_paths: HashMap::new(),
             ai_snippets: vec![],
             stats: SummaryStats {
                 total_prompts: 3,
