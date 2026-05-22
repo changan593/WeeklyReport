@@ -74,6 +74,9 @@ pub struct Message {
     /// 来自 Claude `history.jsonl` 时为 `None`（该文件只存编码过的 project 名，
     /// 无法可靠还原成真实路径）。用于后续读取项目根目录的 md 文档作背景。
     pub project_path: Option<String>,
+    /// 仅对 `role == User` 有意义：该指令引发的 AI 回复（已裁剪到末尾结论段）。
+    /// 由 `pair_replies` 在 session 内配对填充。
+    pub reply: Option<String>,
     pub tool: Tool,
     pub server: String,
 }
@@ -96,6 +99,10 @@ pub struct LogItem {
     /// 来源 workspace 名（= `Message.server`，用户给工作区起的名）。手动新增条目为空。
     #[serde(default)]
     pub server: String,
+    /// 该指令引发的 AI 回复（已裁剪到末尾结论段，≤ 200 字符）。
+    /// 用户连发两条、中间无回复时为 `None`；手动新增条目也为 `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply: Option<String>,
     /// 用户手动新增的（不来自日志）
     #[serde(default)]
     pub manual: bool,
@@ -153,6 +160,9 @@ impl ParseStats {
 
 /// `ai_snippets` 上限；超过这个数后按时间排序取最新 N 条。
 const AI_SNIPPETS_LIMIT: usize = 10;
+
+/// 每条 user 指令配对的 AI 回复裁剪后保留的最大字符数（取末尾结论段）。
+const REPLY_MAX_CHARS: usize = 200;
 
 // ============================================================
 // 公共入口
@@ -307,6 +317,7 @@ pub fn aggregate_with_stats(mut messages: Vec<Message>, parse_stats: ParseStats)
                     timestamp: m.ts.map(|t| t.to_rfc3339()),
                     source: m.tool.as_str().to_string(),
                     server: m.server.clone(),
+                    reply: m.reply,
                     text: m.text,
                     manual: false,
                 };
@@ -442,6 +453,47 @@ pub(crate) fn is_noise_prompt(text: &str) -> bool {
         || (t.starts_with("Automation:") && t.contains("Automation ID:"))
 }
 
+/// 取文本末尾最多 `max` 个字符（按 Unicode char）。
+///
+/// AI 回复的开头中间是过程叙述、末尾才是结论；故只保留末尾。
+/// 超长时丢弃前面、在开头加 `…` 标记被截断。
+pub(crate) fn clip_tail(text: &str, max: usize) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= max {
+        return text.to_string();
+    }
+    let tail: String = chars[chars.len() - max..].iter().collect();
+    format!("…{}", tail.trim_start())
+}
+
+/// 在单个 session 的有序 Message 序列内，把每条 user 指令配上它引发的 AI 回复。
+///
+/// 每条 user 指令向后找第一条 assistant 回复，取其文本末尾结论段
+/// （[`clip_tail`] 裁剪到 `REPLY_MAX_CHARS`）写入 `Message.reply`；
+/// 中途遇到下一条 user 说明本条无回复，跳过。
+///
+/// **必须**对单个 session 内的消息调用 —— 跨 session 混合会配错。
+pub(crate) fn pair_replies(messages: &mut [Message]) {
+    let len = messages.len();
+    for i in 0..len {
+        if messages[i].role != Role::User {
+            continue;
+        }
+        for j in (i + 1)..len {
+            match messages[j].role {
+                Role::Assistant => {
+                    let reply = clip_tail(messages[j].text.trim(), REPLY_MAX_CHARS);
+                    if !reply.is_empty() {
+                        messages[i].reply = Some(reply);
+                    }
+                    break;
+                }
+                Role::User => break, // 下一条 user，本条无回复
+            }
+        }
+    }
+}
+
 /// 判断文件 mtime 是否在 `since` 之后。元数据出错时保守返回 true（保留文件）。
 pub(crate) fn mtime_after(meta: &Metadata, since: DateTime<Local>) -> bool {
     let modified: SystemTime = match meta.modified() {
@@ -467,6 +519,7 @@ mod tests {
             ts: Some(Local::now() - Duration::days(day_offset)),
             project: project.to_string(),
             project_path: None,
+            reply: None,
             tool: Tool::ClaudeCode,
             server: "本机".to_string(),
         }
@@ -480,6 +533,7 @@ mod tests {
             ts: Some(Local::now()),
             project: project.to_string(),
             project_path: Some(path.to_string()),
+            reply: None,
             tool: Tool::ClaudeCode,
             server: "本机".to_string(),
         }
@@ -633,6 +687,49 @@ mod tests {
         assert_eq!(s.by_project["p"].len(), 1, "噪音应被过滤");
         assert_eq!(s.by_project["p"][0].text, "真实工作指令");
         assert_eq!(s.stats.total_prompts, 1);
+    }
+
+    #[test]
+    fn clip_tail_keeps_short_text() {
+        assert_eq!(clip_tail("短文本", 200), "短文本");
+    }
+
+    #[test]
+    fn clip_tail_truncates_from_end() {
+        let long: String = "x".repeat(300);
+        let out = clip_tail(&long, 200);
+        assert!(out.starts_with('…'), "截断应在开头加 … 标记");
+        assert_eq!(out.chars().count(), 201, "… + 末尾 200 字符");
+    }
+
+    #[test]
+    fn pair_replies_attaches_reply_to_user() {
+        let mut msgs = vec![
+            msg(Role::User, "p", "做 A 功能", 0),
+            msg(Role::Assistant, "p", "已完成 A 功能，新增 a.rs", 0),
+        ];
+        pair_replies(&mut msgs);
+        assert_eq!(msgs[0].reply.as_deref(), Some("已完成 A 功能，新增 a.rs"));
+    }
+
+    #[test]
+    fn pair_replies_no_reply_when_user_followed_by_user() {
+        let mut msgs = vec![
+            msg(Role::User, "p", "指令一", 0),
+            msg(Role::User, "p", "指令二", 0),
+        ];
+        pair_replies(&mut msgs);
+        assert_eq!(msgs[0].reply, None);
+    }
+
+    #[test]
+    fn pair_replies_skips_blank_assistant() {
+        let mut msgs = vec![
+            msg(Role::User, "p", "指令", 0),
+            msg(Role::Assistant, "p", "   ", 0),
+        ];
+        pair_replies(&mut msgs);
+        assert_eq!(msgs[0].reply, None);
     }
 
     #[test]
