@@ -313,6 +313,7 @@ export default {
       add_item: 'Add item',
       add_placeholder: 'Type a work record…',
       confirm_delete_item: 'Delete this item?',
+      ai_reply: 'AI reply',
       project_docs: {
         label: 'Project background',
         add: 'Add project background',

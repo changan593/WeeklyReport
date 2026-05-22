@@ -313,6 +313,7 @@ export default {
       add_item: '添加条目',
       add_placeholder: '输入工作记录…',
       confirm_delete_item: '删除这条工作记录？',
+      ai_reply: 'AI 回复',
       project_docs: {
         label: '项目背景',
         add: '添加项目背景',
