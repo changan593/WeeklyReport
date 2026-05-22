@@ -309,8 +309,7 @@ pub fn build_prompt(summary: &Summary, template: &Template, past_reports: &[Stri
     // 每条带 [YYYY-MM-DD] 日期前缀，让 LLM 可按时间组织叙述
     out.push_str("# 工作日志（按项目分组，已用户编辑确认）\n");
     out.push_str("<work_logs>\n");
-    let mut projects: Vec<(&String, &Vec<crate::logs::LogItem>)> =
-        summary.by_project.iter().collect();
+    let mut projects: Vec<(&String, &Vec<LogItem>)> = summary.by_project.iter().collect();
     projects.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then(a.0.cmp(b.0)));
     if projects.is_empty() {
         out.push_str("(本期未提取到任何用户指令)\n");
