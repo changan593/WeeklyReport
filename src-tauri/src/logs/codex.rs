@@ -68,8 +68,8 @@ fn parse_rollout_file(
         }
     };
 
-    // 第一遍：找 session_meta.payload.cwd 作为 project。
-    let project = content
+    // 第一遍：找 session_meta.payload.cwd。完整 cwd 留作 project_path，basename 作 project 名。
+    let cwd_full: Option<String> = content
         .lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
         .find_map(|v| {
@@ -78,18 +78,17 @@ fn parse_rollout_file(
                 return None;
             }
             // 兼容老版本：payload 可能缺失，直接在顶层带 cwd
-            let cwd = v
-                .get("payload")
+            v.get("payload")
                 .and_then(|p| p.get("cwd"))
                 .or_else(|| v.get("cwd"))
-                .and_then(|c| c.as_str())?;
-            Some(path_basename(cwd))
-        })
-        .unwrap_or_else(|| {
-            path.file_stem()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "Codex".to_string())
+                .and_then(|c| c.as_str())
+                .map(|s| s.to_string())
         });
+    let project = cwd_full.as_deref().map(path_basename).unwrap_or_else(|| {
+        path.file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "Codex".to_string())
+    });
 
     // 第二遍：按行解析。
     let mut messages = Vec::new();
@@ -102,7 +101,7 @@ fn parse_rollout_file(
             stats.skipped_lines += 1;
             continue;
         }
-        for m in parse_rollout_line(line, server, &project, clip_chars) {
+        for m in parse_rollout_line(line, server, &project, cwd_full.as_deref(), clip_chars) {
             if m.ts.map_or(true, |ts| ts >= since) {
                 messages.push(m);
             }
@@ -119,6 +118,7 @@ pub(crate) fn parse_rollout_line(
     line: &str,
     server: &str,
     project: &str,
+    project_path: Option<&str>,
     clip_chars: usize,
 ) -> Vec<Message> {
     let line = line.trim();
@@ -145,7 +145,7 @@ pub(crate) fn parse_rollout_line(
     let inner = payload.get("type").and_then(|t| t.as_str()).unwrap_or("");
 
     match inner {
-        "message" => parse_message(payload, server, project, ts, clip_chars),
+        "message" => parse_message(payload, server, project, project_path, ts, clip_chars),
         // function_call / function_call_output / reasoning / local_shell_call / web_search_call /
         // image_generation_call / custom_tool_call* / compaction* → 全部丢弃（v0.1）
         _ => Vec::new(),
@@ -162,6 +162,7 @@ fn parse_message(
     payload: &Value,
     server: &str,
     project: &str,
+    project_path: Option<&str>,
     ts: Option<DateTime<Local>>,
     clip_chars: usize,
 ) -> Vec<Message> {
@@ -225,6 +226,7 @@ fn parse_message(
         text,
         ts,
         project: project.to_string(),
+        project_path: project_path.map(String::from),
         tool: Tool::Codex,
         server: server.to_string(),
     }]
@@ -242,14 +244,14 @@ mod tests {
 
     fn parse_lines(text: &str, project: &str) -> Vec<Message> {
         text.lines()
-            .flat_map(|l| parse_rollout_line(l, "test-srv", project, 200))
+            .flat_map(|l| parse_rollout_line(l, "test-srv", project, None, 200))
             .collect()
     }
 
     #[test]
     fn session_meta_is_dropped() {
         let line = r#"{"timestamp":"2026-05-17T10:00:00Z","type":"session_meta","payload":{"id":"x","cwd":"/p","timestamp":"2026-05-17T10:00:00Z","originator":"codex","cli_version":"0.50.0"}}"#;
-        assert!(parse_rollout_line(line, "srv", "p", 200).is_empty());
+        assert!(parse_rollout_line(line, "srv", "p", None, 200).is_empty());
     }
 
     #[test]
@@ -258,14 +260,14 @@ mod tests {
             let line = format!(
                 r#"{{"timestamp":"2026-05-17T10:00:00Z","type":"{outer}","payload":{{"any":"thing"}}}}"#
             );
-            assert!(parse_rollout_line(&line, "srv", "p", 200).is_empty());
+            assert!(parse_rollout_line(&line, "srv", "p", None, 200).is_empty());
         }
     }
 
     #[test]
     fn user_input_text_is_full_prompt() {
         let line = r#"{"timestamp":"2026-05-17T10:01:00Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"重构这个模块"}]}}"#;
-        let msgs = parse_rollout_line(line, "srv", "weekly-report", 200);
+        let msgs = parse_rollout_line(line, "srv", "weekly-report", None, 200);
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].role, Role::User);
         assert_eq!(msgs[0].text, "重构这个模块");
@@ -279,7 +281,7 @@ mod tests {
         let line = format!(
             r#"{{"timestamp":"2026-05-17T10:02:00Z","type":"response_item","payload":{{"type":"message","role":"assistant","content":[{{"type":"output_text","text":"{long}"}}]}}}}"#
         );
-        let msgs = parse_rollout_line(&line, "srv", "p", 200);
+        let msgs = parse_rollout_line(&line, "srv", "p", None, 200);
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].role, Role::Assistant);
         assert!(msgs[0].text.contains('…'));
@@ -288,7 +290,7 @@ mod tests {
     #[test]
     fn input_image_is_dropped_but_text_still_kept() {
         let line = r#"{"timestamp":"2026-05-17T10:03:00Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_image","image_url":"data:..."},{"type":"input_text","text":"看这张图"}]}}"#;
-        let msgs = parse_rollout_line(line, "srv", "p", 200);
+        let msgs = parse_rollout_line(line, "srv", "p", None, 200);
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].text, "看这张图");
     }
@@ -299,26 +301,26 @@ mod tests {
             let line = format!(
                 r#"{{"timestamp":"2026-05-17T10:00:00Z","type":"response_item","payload":{{"type":"{inner_type}","name":"x","arguments":"{{}}"}}}}"#
             );
-            assert!(parse_rollout_line(&line, "srv", "p", 200).is_empty());
+            assert!(parse_rollout_line(&line, "srv", "p", None, 200).is_empty());
         }
     }
 
     #[test]
     fn broken_or_empty_lines_dropped() {
-        assert!(parse_rollout_line("", "srv", "p", 200).is_empty());
-        assert!(parse_rollout_line("{ not json", "srv", "p", 200).is_empty());
+        assert!(parse_rollout_line("", "srv", "p", None, 200).is_empty());
+        assert!(parse_rollout_line("{ not json", "srv", "p", None, 200).is_empty());
     }
 
     #[test]
     fn missing_payload_dropped() {
         let line = r#"{"timestamp":"...","type":"response_item"}"#;
-        assert!(parse_rollout_line(line, "srv", "p", 200).is_empty());
+        assert!(parse_rollout_line(line, "srv", "p", None, 200).is_empty());
     }
 
     #[test]
     fn empty_content_array_dropped() {
         let line = r#"{"timestamp":"2026-05-17T10:00:00Z","type":"response_item","payload":{"type":"message","role":"user","content":[]}}"#;
-        assert!(parse_rollout_line(line, "srv", "p", 200).is_empty());
+        assert!(parse_rollout_line(line, "srv", "p", None, 200).is_empty());
     }
 
     #[test]
@@ -351,7 +353,7 @@ mod tests {
     fn role_inferred_from_block_type_when_role_missing() {
         // 老版本 Codex 可能不带 role 字段
         let line = r#"{"timestamp":"2026-05-17T10:00:00Z","type":"response_item","payload":{"type":"message","content":[{"type":"input_text","text":"老格式 prompt"}]}}"#;
-        let msgs = parse_rollout_line(line, "srv", "p", 200);
+        let msgs = parse_rollout_line(line, "srv", "p", None, 200);
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].role, Role::User);
     }
