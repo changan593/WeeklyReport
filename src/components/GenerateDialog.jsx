@@ -237,6 +237,25 @@ export default function GenerateDialog({ onClose, onGenerated }) {
     setSelectedIds((prev) => new Set([...prev, newItem.id]));
   }
 
+  // === 项目背景文档编辑 ===
+  function updateProjectDoc(projectName, text) {
+    setCollection((prev) => ({
+      ...prev,
+      summary: {
+        ...prev.summary,
+        project_docs: { ...(prev.summary.project_docs || {}), [projectName]: text },
+      },
+    }));
+  }
+
+  function deleteProjectDoc(projectName) {
+    setCollection((prev) => {
+      const next = { ...(prev.summary.project_docs || {}) };
+      delete next[projectName];
+      return { ...prev, summary: { ...prev.summary, project_docs: next } };
+    });
+  }
+
   // === 第二步：render ===
   async function handleRender() {
     if (selectedIds.size === 0) {
@@ -250,9 +269,16 @@ export default function GenerateDialog({ onClose, onGenerated }) {
       const kept = items.filter((it) => selectedIds.has(it.id));
       if (kept.length > 0) filtered[proj] = kept;
     });
+    // project_docs 只保留仍有勾选条目的项目，避免「有背景无日志」的项目进 prompt
+    const keptProjects = new Set(Object.keys(filtered));
+    const filteredDocs = {};
+    Object.entries(collection.summary.project_docs || {}).forEach(([proj, doc]) => {
+      if (keptProjects.has(proj)) filteredDocs[proj] = doc;
+    });
     const finalSummary = {
       ...collection.summary,
       by_project: filtered,
+      project_docs: filteredDocs,
       // stats 后端 recompute_stats 会重算
     };
 
@@ -343,6 +369,8 @@ export default function GenerateDialog({ onClose, onGenerated }) {
             onUpdateText={updateItemText}
             onDeleteItem={deleteItem}
             onAddItem={addItem}
+            onUpdateDoc={updateProjectDoc}
+            onDeleteDoc={deleteProjectDoc}
             onRefetch={handleRefetch}
           />
         )}
@@ -568,6 +596,8 @@ function ReviewStep({
   onUpdateText,
   onDeleteItem,
   onAddItem,
+  onUpdateDoc,
+  onDeleteDoc,
   onRefetch,
 }) {
   const { t } = useTranslation();
@@ -633,12 +663,15 @@ function ReviewStep({
               key={name}
               name={name}
               items={items}
+              doc={collection.summary.project_docs?.[name]}
               selectedIds={selectedIds}
               onToggleItem={onToggleItem}
               onToggleAll={() => onToggleProject(name)}
               onUpdateText={(id, text) => onUpdateText(name, id, text)}
               onDeleteItem={(id) => onDeleteItem(name, id)}
               onAddItem={(text) => onAddItem(name, text)}
+              onUpdateDoc={(text) => onUpdateDoc(name, text)}
+              onDeleteDoc={() => onDeleteDoc(name)}
             />
           ))}
         </div>
@@ -650,12 +683,15 @@ function ReviewStep({
 function ProjectSection({
   name,
   items,
+  doc,
   selectedIds,
   onToggleItem,
   onToggleAll,
   onUpdateText,
   onDeleteItem,
   onAddItem,
+  onUpdateDoc,
+  onDeleteDoc,
 }) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(true);
@@ -693,6 +729,7 @@ function ProjectSection({
 
       {open && (
         <div className="divide-y divide-stone-100">
+          <ProjectDocPanel doc={doc} onUpdate={onUpdateDoc} onDelete={onDeleteDoc} />
           {items.map((it) => (
             <ItemRow
               key={it.id}
@@ -742,6 +779,57 @@ function ProjectSection({
               {t('generate.review.add_item')}
             </button>
           )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// 项目背景文档面板：展示 / 编辑 / 清空项目根目录的 md 文档（README 等）。
+// doc 为 undefined 表示该项目没有背景文档，显示「添加」入口。
+function ProjectDocPanel({ doc, onUpdate, onDelete }) {
+  const { t } = useTranslation();
+  const [open, setOpen] = useState(false);
+
+  if (typeof doc !== 'string') {
+    return (
+      <button
+        type="button"
+        onClick={() => onUpdate('')}
+        className="flex w-full items-center gap-1.5 px-3 py-2 text-left text-[12px] text-stone-500 hover:bg-stone-50 hover:text-stone-900"
+      >
+        <Icon name="plus" size={12} />
+        {t('generate.review.project_docs.add')}
+      </button>
+    );
+  }
+  return (
+    <div className="bg-stone-50/60">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className="flex w-full items-center gap-1.5 px-3 py-2 text-left text-[12px] text-stone-600 hover:text-stone-900"
+      >
+        <Icon name={open ? 'chevronD' : 'chevronR'} size={12} />
+        <span className="font-medium">{t('generate.review.project_docs.label')}</span>
+        <span className="text-[11px] text-stone-400">
+          {t('generate.review.project_docs.chars', { n: doc.length })}
+        </span>
+      </button>
+      {open && (
+        <div className="space-y-2 px-3 pb-3">
+          <p className="text-[11px] text-stone-400">
+            {t('generate.review.project_docs.hint')}
+          </p>
+          <Textarea
+            value={doc}
+            onChange={onUpdate}
+            rows={6}
+            placeholder={t('generate.review.project_docs.placeholder')}
+          />
+          <SecondaryButton onClick={onDelete}>
+            <Icon name="trash" size={12} /> {t('generate.review.project_docs.clear')}
+          </SecondaryButton>
         </div>
       )}
     </div>
