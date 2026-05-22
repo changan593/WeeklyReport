@@ -370,6 +370,11 @@ pub fn build_prompt(summary: &Summary, template: &Template, past_reports: &[Stri
                     .unwrap_or("无日期");
                 let line = item.text.replace('\n', " ");
                 out.push_str(&format!("  · [{date}] {line}\n"));
+                // 该指令引发的 AI 回复结论段（如有），帮 LLM 写清"做了什么/产出什么"
+                if let Some(reply) = &item.reply {
+                    let r = reply.replace('\n', " ");
+                    out.push_str(&format!("    ↳ AI 回复：{r}\n"));
+                }
             }
             out.push('\n');
         }
@@ -479,6 +484,7 @@ mod tests {
             timestamp: Some("2026-05-17T10:00:00+08:00".into()),
             source: "claude-code".into(),
             server: "本机".into(),
+            reply: None,
             text: text.into(),
             manual: false,
         }
@@ -614,6 +620,16 @@ mod tests {
     fn prompt_omits_project_docs_section_when_empty() {
         let p = build_prompt(&sample_summary(), &tech_template(), &[]);
         assert!(!p.contains("# 项目背景"));
+    }
+
+    #[test]
+    fn prompt_includes_ai_reply_when_present() {
+        let mut s = sample_summary();
+        if let Some(items) = s.by_project.get_mut("weekly-report") {
+            items[0].reply = Some("已完成 LLM 抽象层重构,新增 llm.rs".to_string());
+        }
+        let p = build_prompt(&s, &tech_template(), &[]);
+        assert!(p.contains("↳ AI 回复：已完成 LLM 抽象层重构"));
     }
 
     #[test]

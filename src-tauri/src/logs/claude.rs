@@ -126,6 +126,8 @@ pub(crate) fn parse_history_line(line: &str, server: &str) -> Option<Message> {
         // history.jsonl 的 project 字段是编码串（`-Users-me-app`），
         // 无法可靠还原成真实路径 → project_path 留 None
         project_path: None,
+        // history.jsonl 没有 assistant 回复，无从配对
+        reply: None,
         tool: Tool::ClaudeCode,
         server: server.to_string(),
     })
@@ -180,6 +182,8 @@ fn parse_session_file(
             }
         }
     }
+    // 同 session 内把每条 user 指令配上紧跟的 AI 回复
+    super::pair_replies(&mut messages);
     (messages, stats)
 }
 
@@ -252,6 +256,8 @@ fn parse_user_line(
         ts,
         project: project.to_string(),
         project_path: project_path.map(String::from),
+        // 由 pair_replies 在 session 内配对填充
+        reply: None,
         tool: Tool::ClaudeCode,
         server: server.to_string(),
     }]
@@ -299,6 +305,8 @@ fn parse_assistant_line(
         ts,
         project: project.to_string(),
         project_path: project_path.map(String::from),
+        // assistant 是被配对的对象，自身 reply 恒为 None
+        reply: None,
         tool: Tool::ClaudeCode,
         server: server.to_string(),
     }]

@@ -107,6 +107,8 @@ fn parse_rollout_file(
             }
         }
     }
+    // 同 session 内把每条 user 指令配上紧跟的 AI 回复
+    super::pair_replies(&mut messages);
     (messages, stats)
 }
 
@@ -227,6 +229,8 @@ fn parse_message(
         ts,
         project: project.to_string(),
         project_path: project_path.map(String::from),
+        // user 由 pair_replies 配对填充；assistant 恒 None
+        reply: None,
         tool: Tool::Codex,
         server: server.to_string(),
     }]
