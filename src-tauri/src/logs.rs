@@ -291,6 +291,11 @@ pub fn aggregate_with_stats(mut messages: Vec<Message>, parse_stats: ParseStats)
         }
         match m.role {
             Role::User => {
+                // 工具注入的噪音（environment_context / turn_aborted /
+                // automation 触发块）不是用户真实工作内容，直接跳过
+                if is_noise_prompt(&m.text) {
+                    continue;
+                }
                 if let Some(prev) = last_text_per_project.get(&m.project) {
                     if prefix_match(prev, &m.text, 30) {
                         continue; // 相邻重复，跳过
@@ -422,6 +427,19 @@ fn prefix_match(prev: &str, current: &str, n: usize) -> bool {
         return false;
     }
     p[..min] == c[..min]
+}
+
+/// 判断一条用户 prompt 是否为工具自动注入的噪音（非用户真实工作内容）。
+///
+/// 已知噪音类型（均来自 Codex CLI）：
+/// - 每轮注入的 `<environment_context>` 环境信息块（cwd / shell / 日期 / 时区）
+/// - 中断提示 `<turn_aborted>`
+/// - automation 定时任务的触发文本（`Automation:` 元信息头 + `Automation ID:`）
+pub(crate) fn is_noise_prompt(text: &str) -> bool {
+    let t = text.trim_start();
+    t.starts_with("<environment_context>")
+        || t.starts_with("<turn_aborted>")
+        || (t.starts_with("Automation:") && t.contains("Automation ID:"))
 }
 
 /// 判断文件 mtime 是否在 `since` 之后。元数据出错时保守返回 true（保留文件）。
@@ -573,6 +591,48 @@ mod tests {
         assert!(!prefix_match("abc", "xyz", 30));
         assert!(!prefix_match("", "abc", 30));
         assert!(!prefix_match("abc", "", 30));
+    }
+
+    #[test]
+    fn is_noise_prompt_detects_codex_injections() {
+        assert!(is_noise_prompt(
+            "<environment_context>\n  <cwd>/x</cwd>\n</environment_context>"
+        ));
+        // 前导空白也要识别
+        assert!(is_noise_prompt(
+            "  <environment_context>\n<current_date>2026</current_date>"
+        ));
+        assert!(is_noise_prompt(
+            "<turn_aborted>\nThe user interrupted the previous turn."
+        ));
+        assert!(is_noise_prompt(
+            "Automation: companies observation\nAutomation ID: companies-observation\nLast run: x"
+        ));
+    }
+
+    #[test]
+    fn is_noise_prompt_keeps_real_prompts() {
+        assert!(!is_noise_prompt("帮我重构 scheduler.rs 的 cron 解析"));
+        // 只是提到 Automation 这个词，不是触发块
+        assert!(!is_noise_prompt("Automation 这个词是什么意思"));
+        assert!(!is_noise_prompt("讲一下 <environment> 标签的用法"));
+    }
+
+    #[test]
+    fn aggregate_filters_noise_prompts() {
+        let msgs = vec![
+            msg(
+                Role::User,
+                "p",
+                "<environment_context>\n<cwd>/x</cwd>\n</environment_context>",
+                1,
+            ),
+            msg(Role::User, "p", "真实工作指令", 0),
+        ];
+        let s = aggregate(msgs);
+        assert_eq!(s.by_project["p"].len(), 1, "噪音应被过滤");
+        assert_eq!(s.by_project["p"][0].text, "真实工作指令");
+        assert_eq!(s.stats.total_prompts, 1);
     }
 
     #[test]
