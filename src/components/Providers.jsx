@@ -13,6 +13,7 @@ import {
   useAsyncState,
   formatError,
 } from '../api.js';
+import { withTimeout } from '../utils.js';
 import { useTranslation } from '../i18n/index.jsx';
 import {
   EmptyState,
@@ -75,9 +76,12 @@ export default function Providers() {
   async function handleTest(p) {
     setTestStatus((prev) => ({ ...prev, [p.id]: { state: 'testing' } }));
     try {
-      const msg = await testProvider(p);
+      // 后端 LLM 超时是 120s；前端给 130s 兜底，避免极端网络下 UI 永远卡在「测试中」。
+      const msg = await withTimeout(testProvider(p), 130_000);
       setTestStatus((prev) => ({ ...prev, [p.id]: { state: 'ok', message: msg } }));
     } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error('[provider test failed]', p?.id, e);
       setTestStatus((prev) => ({
         ...prev,
         [p.id]: { state: 'failed', message: formatError(e) },
