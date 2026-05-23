@@ -33,6 +33,7 @@ import {
   SecondaryButton,
   Select,
   StatusBanner,
+  StatusPill,
   Textarea,
   Toggle,
 } from './ui.jsx';
@@ -49,7 +50,7 @@ const CRON_PRESETS = [
 
 const DAY_OPTIONS = [3, 7, 14, 30];
 
-export default function Schedules() {
+export default function Schedules({ navigate }) {
   const { t } = useTranslation();
   const [items, loading, reload] = useAsyncState(listSchedules, []);
   const [workspaces, setWorkspaces] = useState([]);
@@ -111,8 +112,17 @@ export default function Schedules() {
       </header>
 
       {!smtpConfigured && (
-        <div className="mb-4 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-[12.5px] text-amber-700">
-          {t('schedules.no_smtp_warning')}
+        <div className="mb-4 flex items-start justify-between gap-3 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-[12.5px] text-amber-700">
+          <span>{t('schedules.no_smtp_warning')}</span>
+          {navigate && (
+            <button
+              type="button"
+              onClick={() => navigate('settings')}
+              className="shrink-0 rounded border border-amber-300 bg-white px-2 py-0.5 text-[11.5px] text-amber-700 hover:border-amber-400"
+            >
+              {t('schedules.go_settings')}
+            </button>
+          )}
         </div>
       )}
 
@@ -157,11 +167,21 @@ function ScheduleCard({ view, onEdit, onDelete, onToggle, onRunNow }) {
   const enabled = view.enabled;
   const lastStatus = view.last_status || '';
   const isFail = lastStatus.startsWith('failed');
+  const pill = (() => {
+    if (!enabled) return { tone: 'neutral', label: t('schedules.card.status.disabled') };
+    if (isFail) return { tone: 'error', label: t('schedules.card.status.failed'), title: lastStatus };
+    if (lastStatus) return { tone: 'success', label: t('schedules.card.status.ok'), title: lastStatus };
+    return { tone: 'info', label: t('schedules.card.status.scheduled') };
+  })();
   return (
     <div className="flex items-start gap-3 rounded-lg border border-stone-200 bg-white p-5 hover:border-stone-300">
       <div
         className={`mt-0.5 flex h-9 w-9 items-center justify-center rounded-lg ${
-          enabled ? 'bg-emerald-50 text-emerald-700' : 'bg-stone-100 text-stone-400'
+          enabled
+            ? isFail
+              ? 'bg-rose-50 text-rose-600'
+              : 'bg-emerald-50 text-emerald-700'
+            : 'bg-stone-100 text-stone-400'
         }`}
       >
         <Icon name="clock" size={18} />
@@ -169,6 +189,7 @@ function ScheduleCard({ view, onEdit, onDelete, onToggle, onRunNow }) {
       <div className="flex-1 overflow-hidden">
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-[14px] font-medium text-stone-900">{view.name}</span>
+          <StatusPill tone={pill.tone} label={pill.label} title={pill.title} />
           <code className="rounded bg-stone-100 px-1.5 py-0.5 font-mono text-[11px] text-stone-600">
             {view.cron}
           </code>
@@ -182,12 +203,10 @@ function ScheduleCard({ view, onEdit, onDelete, onToggle, onRunNow }) {
             <span>{t('schedules.card.next', { time: formatIso(view.next_run_computed) })}</span>
           )}
           {view.last_run && <span>{t('schedules.card.last', { time: formatIso(view.last_run) })}</span>}
-          {lastStatus && (
-            <span className={isFail ? 'text-rose-700' : 'text-emerald-700'}>
-              {lastStatus.slice(0, 60)}
-            </span>
-          )}
         </div>
+        {isFail && lastStatus && (
+          <div className="mt-1 line-clamp-2 text-[11.5px] text-rose-700">{lastStatus}</div>
+        )}
       </div>
       <div className="flex flex-col items-end gap-2">
         <Toggle on={enabled} onChange={onToggle} />

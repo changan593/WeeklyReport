@@ -36,6 +36,16 @@ If your OS blocks the app on first launch:
 
 For SSH remote-workspace setup see [docs/SSH.md](./docs/SSH.md).
 
+## Releases
+
+One line per release — full notes in [docs/CHANGELOG.md](./docs/CHANGELOG.md).
+
+| Version | Date | Highlight |
+| --- | --- | --- |
+| **Unreleased** | — | Status badges on Workspaces & LLM Sources, beautified report HTML with stats card and per-project chart, and light PM-polish across pages. |
+| **0.1.1** | 2026-05-21 | Three Windows-only fixes (console-window, modal drag-close, SSH key hint) and a complete SSH setup guide. |
+| **0.1.0** | 2026-05-20 | First public release — end-to-end pipeline: log collection → compression → LLM generation → local archive → scheduled email. |
+
 ## Clients
 
 This repo ships **two independent client implementations**, released together:

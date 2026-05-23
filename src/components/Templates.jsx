@@ -7,6 +7,7 @@ import { useEffect, useState } from 'react';
 import {
   deleteTemplate,
   listProviders,
+  listSchedules,
   listTemplates,
   saveTemplate,
   useAsyncState,
@@ -45,10 +46,21 @@ export default function Templates() {
   const { t } = useTranslation();
   const [items, loading, reload] = useAsyncState(listTemplates, []);
   const [providers, setProviders] = useState([]);
+  const [scheduleUsage, setScheduleUsage] = useState({});
   const [editing, setEditing] = useState(null);
 
   useEffect(() => {
     listProviders().then(setProviders).catch(() => setProviders([]));
+    // 取每个模板被定时任务引用的次数，用于卡片角标提示"已在 N 个任务中使用"
+    listSchedules()
+      .then((schedules) => {
+        const counts = {};
+        for (const s of schedules || []) {
+          if (s.template_id) counts[s.template_id] = (counts[s.template_id] || 0) + 1;
+        }
+        setScheduleUsage(counts);
+      })
+      .catch(() => setScheduleUsage({}));
   }, []);
 
   async function handleDelete(tpl) {
@@ -83,6 +95,7 @@ export default function Templates() {
             <TemplateCard
               key={tpl.id}
               template={tpl}
+              usageCount={scheduleUsage[tpl.id] || 0}
               onEdit={() => setEditing(tpl)}
               onDelete={() => handleDelete(tpl)}
             />
@@ -105,16 +118,25 @@ export default function Templates() {
   );
 }
 
-function TemplateCard({ template, onEdit, onDelete }) {
+function TemplateCard({ template, usageCount = 0, onEdit, onDelete }) {
   const { t } = useTranslation();
   const color = STYLE_COLOR[template.style] || STYLE_COLOR.custom;
   return (
     <div className="flex flex-col gap-2 rounded-lg border border-stone-200 bg-white p-5 hover:border-stone-300">
-      <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2">
         <span className="text-[14px] font-medium text-stone-900">{template.name}</span>
         <span className={`rounded px-1.5 py-0.5 text-[11px] ${color}`}>
           {t(styleLabelKey(template.style))}
         </span>
+        {usageCount > 0 && (
+          <span
+            className="inline-flex items-center gap-1 rounded bg-sky-50 px-1.5 py-0.5 text-[11px] text-sky-700"
+            title={t('templates.card.used_by_tip')}
+          >
+            <Icon name="schedule" size={11} />
+            {t('templates.card.used_by', { n: usageCount })}
+          </span>
+        )}
       </div>
       <div className="text-[11.5px] text-stone-500">
         {t('templates.card.sections_count', { n: template.sections?.length || 0 })}

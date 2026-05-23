@@ -74,7 +74,12 @@ export default function App() {
       {/* 主内容 */}
       <main className="flex-1 overflow-auto">
         <div className="mx-auto max-w-4xl px-10 py-10">
-          <Page page={page} reportsNonce={reportsNonce} />
+          <Page
+            page={page}
+            reportsNonce={reportsNonce}
+            navigate={setPage}
+            onOpenGenerate={() => setGenOpen(true)}
+          />
         </div>
       </main>
 
@@ -88,12 +93,12 @@ export default function App() {
   );
 }
 
-function Page({ page, reportsNonce }) {
+function Page({ page, reportsNonce, navigate, onOpenGenerate }) {
   if (page === 'workspaces') return <Workspaces />;
   if (page === 'providers') return <Providers />;
   if (page === 'templates') return <Templates />;
-  if (page === 'reports') return <Reports key={reportsNonce} />;
-  if (page === 'schedules') return <Schedules />;
+  if (page === 'reports') return <Reports key={reportsNonce} onOpenGenerate={onOpenGenerate} />;
+  if (page === 'schedules') return <Schedules navigate={navigate} />;
   if (page === 'settings') return <Settings />;
   return null;
 }

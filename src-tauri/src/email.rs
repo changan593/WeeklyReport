@@ -62,6 +62,30 @@ pub struct EmailRequest {
     pub subject: String,
     /// 正文 Markdown；发送时由 [`render_html`] 转 HTML，同时附 plain text 副本。
     pub body_markdown: String,
+    /// 可选：报告元数据。提供时邮件 HTML 会带顶部统计卡片 + 按项目条形图。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_meta: Option<ReportMeta>,
+}
+
+/// 报告元数据，用于美化 HTML 顶部统计区与按项目条形图。
+/// 与 `report::ReportRecord` 解耦（避免 email→report 循环依赖），
+/// 由调用方按需 `From<&ReportRecord>` 构造（见 `report.rs::ReportMeta::from_record`）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ReportMeta {
+    /// 时间范围，如 "最近 7 天"
+    pub week: String,
+    /// 项目数
+    pub project_count: u32,
+    /// 已用 token
+    pub tokens_used: u32,
+    /// LLM 源显示名（可选）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_name: Option<String>,
+    /// 生成时间（RFC3339）
+    pub generated_at: String,
+    /// 按项目工作记录数；为空则不渲染条形图
+    #[serde(default)]
+    pub project_breakdown: Vec<(String, u32)>,
 }
 
 // ============================================================
@@ -87,7 +111,10 @@ pub async fn send(cfg: &SmtpConfig, req: &EmailRequest) -> Result<()> {
         builder = builder.cc(parse_mailbox(cc)?);
     }
 
-    let html = render_html(&req.body_markdown);
+    let html = match &req.body_meta {
+        Some(meta) => render_html_with_meta(&req.body_markdown, meta),
+        None => render_html(&req.body_markdown),
+    };
     let plain = req.body_markdown.clone();
 
     let body = MultiPart::alternative()
@@ -186,7 +213,18 @@ fn parse_mailbox(s: &str) -> Result<Mailbox> {
 /// 不支持：链接、图片、表格、嵌套列表、HTML 内嵌。
 pub fn render_html(md: &str) -> String {
     let body = render_body(md);
-    wrap_html(&body)
+    wrap_html(None, &body)
+}
+
+/// 同 [`render_html`]，但在正文上方追加由 `meta` 渲染的统计卡片与按项目条形图。
+///
+/// 用于 Reports 详情页与定时邮件，让收件人一眼看到「时间范围 / 项目数 / tokens / 生成时间」
+/// 以及各项目工作量分布。
+pub fn render_html_with_meta(md: &str, meta: &ReportMeta) -> String {
+    let body = render_body(md);
+    let header = render_meta_header(meta);
+    let combined = format!("{header}\n{body}");
+    wrap_html(Some(meta), &combined)
 }
 
 /// 仅渲染 body 部分（不带 html/head 包裹），便于单元测试。
@@ -350,30 +388,181 @@ fn replace_pair(s: &str, delim: &str, open: &str, close: &str) -> String {
     out
 }
 
-/// 用极简 inline CSS 包裹 body，适配 Gmail / iOS Mail 等主流客户端。
-fn wrap_html(body: &str) -> String {
+/// 用 inline CSS 包裹 body，适配 Gmail / iOS Mail 等主流客户端。
+///
+/// 设计目标：
+/// - 视觉层次清晰：H1 / H2 都有视觉锚点（H1 渐变下划线 / H2 左色条）
+/// - 邮件客户端兼容：避免 flexbox（用 table），所有动态值（如 bar width）走 inline style
+/// - 暗色友好：色板基于 stone + emerald 暖灰，不与系统暗色冲突
+fn wrap_html(meta: Option<&ReportMeta>, body: &str) -> String {
     let lang = i18n::current_language();
+    // 邮件正文最大宽度；统计卡内部用 table 自适应。
+    let max_w = if meta.is_some() { 760 } else { 720 };
     format!(
         "<!doctype html>
 <html lang=\"{lang}\"><head>
 <meta charset=\"utf-8\">
 <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">
 <style>
-  body {{ font-family: -apple-system, \"PingFang SC\", \"Microsoft YaHei\", sans-serif; color: #1c1917; line-height: 1.6; max-width: 720px; margin: 24px auto; padding: 0 16px; background: #ffffff; }}
-  h1, h2, h3 {{ color: #1c1917; margin-top: 24px; }}
-  h1 {{ font-size: 22px; }}
-  h2 {{ font-size: 18px; border-bottom: 1px solid #e7e5e4; padding-bottom: 6px; }}
-  h3 {{ font-size: 15px; }}
-  p {{ margin: 8px 0; }}
+  body {{ font-family: -apple-system, BlinkMacSystemFont, \"Segoe UI\", \"PingFang SC\", \"Microsoft YaHei\", \"Helvetica Neue\", sans-serif; color: #1c1917; line-height: 1.65; max-width: {max_w}px; margin: 28px auto; padding: 0 20px; background: #ffffff; -webkit-font-smoothing: antialiased; }}
+  h1, h2, h3 {{ color: #1c1917; margin-top: 28px; margin-bottom: 12px; font-weight: 600; letter-spacing: -0.01em; }}
+  h1 {{ font-size: 24px; padding-bottom: 10px; border-bottom: 2px solid #1c1917; display: inline-block; }}
+  h2 {{ font-size: 18px; padding-left: 12px; border-left: 3px solid #10b981; line-height: 1.4; }}
+  h3 {{ font-size: 14.5px; color: #44403c; }}
+  p {{ margin: 10px 0; }}
   ul {{ padding-left: 22px; }}
-  li {{ margin: 4px 0; }}
-  blockquote {{ border-left: 3px solid #d6d3d1; color: #57534e; padding: 4px 12px; margin: 8px 0; background: #fafaf9; }}
-  code {{ background: #f5f5f4; padding: 1px 5px; border-radius: 3px; font-family: ui-monospace, \"SF Mono\", Menlo, monospace; font-size: 0.92em; color: #44403c; }}
-  hr {{ border: none; border-top: 1px solid #e7e5e4; margin: 16px 0; }}
-  strong {{ font-weight: 600; }}
+  li {{ margin: 5px 0; }}
+  blockquote {{ border-left: 3px solid #a8a29e; color: #57534e; padding: 8px 14px; margin: 12px 0; background: #fafaf9; border-radius: 0 4px 4px 0; }}
+  code {{ background: #f5f5f4; padding: 1.5px 6px; border-radius: 4px; font-family: ui-monospace, \"SF Mono\", Menlo, monospace; font-size: 0.88em; color: #1f2937; border: 1px solid #e7e5e4; }}
+  hr {{ border: none; border-top: 1px solid #e7e5e4; margin: 20px 0; }}
+  strong {{ font-weight: 600; color: #0c0a09; }}
+  .wr-meta {{ margin: 0 0 28px; background: linear-gradient(135deg, #fafaf9 0%, #f5f5f4 100%); border: 1px solid #e7e5e4; border-radius: 12px; padding: 18px 20px; }}
+  .wr-meta-title {{ font-size: 12px; text-transform: uppercase; letter-spacing: 0.1em; color: #78716c; margin: 0 0 12px; font-weight: 600; }}
+  .wr-meta-week {{ font-size: 19px; font-weight: 600; color: #0c0a09; margin: 0 0 14px; letter-spacing: -0.01em; }}
+  .wr-stats {{ width: 100%; border-collapse: separate; border-spacing: 8px 0; table-layout: fixed; }}
+  .wr-stat {{ background: #ffffff; border: 1px solid #e7e5e4; border-radius: 8px; padding: 12px 14px; vertical-align: top; }}
+  .wr-stat-label {{ font-size: 11px; color: #78716c; text-transform: uppercase; letter-spacing: 0.06em; margin: 0 0 4px; font-weight: 600; }}
+  .wr-stat-value {{ font-size: 18px; font-weight: 600; color: #0c0a09; margin: 0; letter-spacing: -0.01em; }}
+  .wr-stat-suffix {{ font-size: 11.5px; color: #78716c; font-weight: 400; margin-left: 3px; }}
+  .wr-chart {{ margin: 0 0 28px; background: #ffffff; border: 1px solid #e7e5e4; border-radius: 12px; padding: 16px 18px; }}
+  .wr-chart-title {{ font-size: 12px; text-transform: uppercase; letter-spacing: 0.1em; color: #78716c; margin: 0 0 12px; font-weight: 600; }}
+  .wr-chart-table {{ width: 100%; border-collapse: collapse; }}
+  .wr-chart-row td {{ padding: 5px 0; vertical-align: middle; }}
+  .wr-chart-name {{ font-size: 13px; color: #292524; padding-right: 12px; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+  .wr-chart-bar-track {{ width: 100%; height: 8px; background: #f5f5f4; border-radius: 4px; overflow: hidden; }}
+  .wr-chart-bar-fill {{ height: 8px; background: linear-gradient(90deg, #10b981 0%, #059669 100%); border-radius: 4px; }}
+  .wr-chart-count {{ font-size: 12px; color: #57534e; font-variant-numeric: tabular-nums; text-align: right; padding-left: 12px; min-width: 36px; }}
+  @media (max-width: 540px) {{
+    .wr-stats {{ border-spacing: 0; }}
+    .wr-stat {{ display: block; margin-bottom: 8px; }}
+    .wr-chart-name {{ max-width: 120px; }}
+  }}
 </style></head><body>
 {body}</body></html>"
     )
+}
+
+/// 渲染顶部统计卡片 + （若有）按项目工作量条形图。
+fn render_meta_header(meta: &ReportMeta) -> String {
+    let mut out = String::new();
+    out.push_str("<div class=\"wr-meta\">\n");
+    out.push_str("  <div class=\"wr-meta-title\">");
+    out.push_str(&html_escape(&i18n::t("email.html.meta_title")));
+    out.push_str("</div>\n");
+    out.push_str("  <div class=\"wr-meta-week\">");
+    out.push_str(&html_escape(&meta.week));
+    out.push_str("</div>\n");
+
+    // 三~四个统计 tile：项目数 / tokens / LLM / 生成时间
+    out.push_str("  <table class=\"wr-stats\" role=\"presentation\" cellspacing=\"0\" cellpadding=\"0\"><tr>\n");
+
+    out.push_str("    <td class=\"wr-stat\">\n");
+    out.push_str("      <div class=\"wr-stat-label\">");
+    out.push_str(&html_escape(&i18n::t("email.html.stat.projects")));
+    out.push_str("</div>\n");
+    out.push_str(&format!(
+        "      <div class=\"wr-stat-value\">{}</div>\n",
+        meta.project_count
+    ));
+    out.push_str("    </td>\n");
+
+    out.push_str("    <td class=\"wr-stat\">\n");
+    out.push_str("      <div class=\"wr-stat-label\">");
+    out.push_str(&html_escape(&i18n::t("email.html.stat.tokens")));
+    out.push_str("</div>\n");
+    out.push_str(&format!(
+        "      <div class=\"wr-stat-value\">{}</div>\n",
+        format_compact(meta.tokens_used as u64)
+    ));
+    out.push_str("    </td>\n");
+
+    if let Some(name) = &meta.provider_name {
+        if !name.trim().is_empty() {
+            out.push_str("    <td class=\"wr-stat\">\n");
+            out.push_str("      <div class=\"wr-stat-label\">");
+            out.push_str(&html_escape(&i18n::t("email.html.stat.llm")));
+            out.push_str("</div>\n");
+            out.push_str(&format!(
+                "      <div class=\"wr-stat-value\" style=\"font-size:14px;\">{}</div>\n",
+                html_escape(name)
+            ));
+            out.push_str("    </td>\n");
+        }
+    }
+
+    let date_display = format_generated_at(&meta.generated_at);
+    out.push_str("    <td class=\"wr-stat\">\n");
+    out.push_str("      <div class=\"wr-stat-label\">");
+    out.push_str(&html_escape(&i18n::t("email.html.stat.generated")));
+    out.push_str("</div>\n");
+    out.push_str(&format!(
+        "      <div class=\"wr-stat-value\" style=\"font-size:14px;\">{}</div>\n",
+        html_escape(&date_display)
+    ));
+    out.push_str("    </td>\n");
+
+    out.push_str("  </tr></table>\n");
+    out.push_str("</div>\n");
+
+    // 项目分布条形图：取 Top 8，按数量降序
+    if !meta.project_breakdown.is_empty() {
+        let mut rows: Vec<(String, u32)> = meta.project_breakdown.clone();
+        rows.sort_by(|a, b| b.1.cmp(&a.1));
+        let max_val = rows.iter().map(|(_, v)| *v).max().unwrap_or(1).max(1);
+        let limit = rows.len().min(8);
+        let rows = &rows[..limit];
+
+        out.push_str("<div class=\"wr-chart\">\n");
+        out.push_str("  <div class=\"wr-chart-title\">");
+        out.push_str(&html_escape(&i18n::t("email.html.chart_title")));
+        out.push_str("</div>\n");
+        out.push_str("  <table class=\"wr-chart-table\" role=\"presentation\" cellspacing=\"0\" cellpadding=\"0\">\n");
+        for (name, count) in rows {
+            let pct = (*count as f64 / max_val as f64 * 100.0).round() as u32;
+            // 至少给一个可见的最小宽度
+            let pct = pct.max(4);
+            out.push_str("    <tr class=\"wr-chart-row\">\n");
+            out.push_str(&format!(
+                "      <td class=\"wr-chart-name\" style=\"width: 32%;\">{}</td>\n",
+                html_escape(name)
+            ));
+            out.push_str("      <td>\n");
+            out.push_str(&format!(
+                "        <div class=\"wr-chart-bar-track\"><div class=\"wr-chart-bar-fill\" style=\"width: {pct}%;\"></div></div>\n"
+            ));
+            out.push_str("      </td>\n");
+            out.push_str(&format!(
+                "      <td class=\"wr-chart-count\" style=\"width: 56px;\">{count}</td>\n"
+            ));
+            out.push_str("    </tr>\n");
+        }
+        out.push_str("  </table>\n");
+        out.push_str("</div>\n");
+    }
+
+    out
+}
+
+/// 把大数字压成 "1.2k / 3.4M" 形式，节省统计卡空间。
+fn format_compact(n: u64) -> String {
+    if n < 1_000 {
+        return n.to_string();
+    }
+    if n < 1_000_000 {
+        let v = n as f64 / 1_000.0;
+        return format!("{v:.1}k");
+    }
+    let v = n as f64 / 1_000_000.0;
+    format!("{v:.1}M")
+}
+
+/// 把 RFC3339 时间裁成 "YYYY-MM-DD HH:MM"；解析失败时原样返回前 16 字符。
+fn format_generated_at(s: &str) -> String {
+    use chrono::DateTime;
+    if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
+        return dt.format("%Y-%m-%d %H:%M").to_string();
+    }
+    s.chars().take(16).collect()
 }
 
 // ============================================================
@@ -408,6 +597,28 @@ mod tests {
             cc: vec!["c@x.com".into()],
             subject: "x".into(),
             body_markdown: "# h\n- a\n".into(),
+            body_meta: None,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let back: EmailRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(req, back);
+    }
+
+    #[test]
+    fn email_request_round_trip_with_meta() {
+        let req = EmailRequest {
+            to: vec!["a@x.com".into()],
+            cc: vec![],
+            subject: "x".into(),
+            body_markdown: "# h\n".into(),
+            body_meta: Some(ReportMeta {
+                week: "最近 7 天".into(),
+                project_count: 3,
+                tokens_used: 12345,
+                provider_name: Some("DeepSeek".into()),
+                generated_at: "2026-05-23T10:00:00+08:00".into(),
+                project_breakdown: vec![("a".into(), 5), ("b".into(), 3)],
+            }),
         };
         let json = serde_json::to_string(&req).unwrap();
         let back: EmailRequest = serde_json::from_str(&json).unwrap();
@@ -550,6 +761,146 @@ mod tests {
         };
         let err = send(&cfg, &req).await.unwrap_err().to_string();
         assert!(err.contains("host"));
+    }
+
+    // -------- ReportMeta / render_html_with_meta --------
+
+    #[test]
+    fn format_compact_works() {
+        assert_eq!(format_compact(0), "0");
+        assert_eq!(format_compact(999), "999");
+        assert_eq!(format_compact(1_000), "1.0k");
+        assert_eq!(format_compact(1_234), "1.2k");
+        assert_eq!(format_compact(12_345), "12.3k");
+        assert_eq!(format_compact(1_500_000), "1.5M");
+    }
+
+    #[test]
+    fn format_generated_at_iso8601() {
+        let r = format_generated_at("2026-05-23T10:30:00+08:00");
+        assert_eq!(r, "2026-05-23 10:30");
+    }
+
+    #[test]
+    fn format_generated_at_invalid_fallbacks_to_prefix() {
+        let r = format_generated_at("not a date");
+        assert_eq!(r, "not a date");
+    }
+
+    #[test]
+    fn render_meta_header_includes_stats() {
+        let m = ReportMeta {
+            week: "最近 7 天".into(),
+            project_count: 3,
+            tokens_used: 12_345,
+            provider_name: Some("DeepSeek".into()),
+            generated_at: "2026-05-23T10:00:00+08:00".into(),
+            project_breakdown: vec![],
+        };
+        let html = render_meta_header(&m);
+        assert!(html.contains("最近 7 天"));
+        assert!(html.contains(">3<")); // project_count
+        assert!(html.contains("12.3k")); // tokens
+        assert!(html.contains("DeepSeek"));
+        assert!(html.contains("2026-05-23 10:00"));
+        // 无 breakdown 时不应渲染图表
+        assert!(!html.contains("wr-chart"));
+    }
+
+    #[test]
+    fn render_meta_header_includes_chart_when_breakdown_present() {
+        let m = ReportMeta {
+            week: "x".into(),
+            project_count: 2,
+            tokens_used: 1000,
+            provider_name: None,
+            generated_at: "2026-01-01T00:00:00+00:00".into(),
+            project_breakdown: vec![("alpha".into(), 10), ("beta".into(), 3)],
+        };
+        let html = render_meta_header(&m);
+        assert!(html.contains("wr-chart"), "应渲染图表块");
+        assert!(html.contains(">alpha<"));
+        assert!(html.contains(">beta<"));
+        // alpha 是最大值，应该是 100%
+        assert!(html.contains("width: 100%"));
+    }
+
+    #[test]
+    fn render_meta_header_xss_safe() {
+        let m = ReportMeta {
+            week: "<script>alert(1)</script>".into(),
+            project_count: 1,
+            tokens_used: 0,
+            provider_name: Some("<img>".into()),
+            generated_at: "x".into(),
+            project_breakdown: vec![("<b>".into(), 1)],
+        };
+        let html = render_meta_header(&m);
+        assert!(!html.contains("<script>"));
+        assert!(html.contains("&lt;script&gt;"));
+        assert!(html.contains("&lt;img&gt;"));
+        assert!(html.contains("&lt;b&gt;"));
+    }
+
+    #[test]
+    fn full_html_with_meta_has_meta_block_and_body() {
+        let m = ReportMeta {
+            week: "最近 7 天".into(),
+            project_count: 2,
+            tokens_used: 500,
+            provider_name: Some("Local".into()),
+            generated_at: "2026-05-23T10:00:00+08:00".into(),
+            project_breakdown: vec![("p1".into(), 4), ("p2".into(), 2)],
+        };
+        let html = render_html_with_meta("# 周报\n\n正文。", &m);
+        assert!(html.starts_with("<!doctype html>"));
+        assert!(html.contains("wr-meta"));
+        assert!(html.contains("wr-chart"));
+        assert!(html.contains("<h1>周报</h1>"));
+        // meta 块应在 h1 之前
+        let meta_pos = html.find("wr-meta").unwrap();
+        let h1_pos = html.find("<h1>").unwrap();
+        assert!(
+            meta_pos < h1_pos,
+            "meta block should appear before report body"
+        );
+    }
+
+    #[test]
+    fn full_html_without_meta_unchanged() {
+        let html = render_html("# Hi\n\nbody");
+        assert!(html.starts_with("<!doctype html>"));
+        // CSS 类名一定在 <style> 里；这里检查实际渲染的 div 是否存在。
+        assert!(!html.contains("<div class=\"wr-meta\">"));
+        assert!(!html.contains("<div class=\"wr-chart\">"));
+        assert!(html.contains("<h1>Hi</h1>"));
+    }
+
+    /// 手动验证用：`cargo test --bin weekly-report -- --ignored dump_sample_html --nocapture`
+    /// 会把示例 HTML 写到 /tmp/sample-meta.html，便于人工预览（浏览器打开看效果）。
+    #[test]
+    #[ignore]
+    fn dump_sample_html() {
+        let meta = ReportMeta {
+            week: "最近 7 天 (2026-05-17 → 2026-05-23)".into(),
+            project_count: 4,
+            tokens_used: 18_426,
+            provider_name: Some("DeepSeek (deepseek-chat)".into()),
+            generated_at: "2026-05-23T18:30:00+08:00".into(),
+            project_breakdown: vec![
+                ("weekly-report".into(), 42),
+                ("dashboard-v2".into(), 28),
+                ("infra/terraform".into(), 17),
+                ("docs-site".into(), 9),
+            ],
+        };
+        let md = "# 本周周报\n\n## weekly-report\n\n本周完成了 HTML 邮件渲染的美化与统计卡片，新增按项目工作量条形图。重构 `render_html_with_meta`，与原 `render_html` 并存以保持向后兼容。\n\n- 新增 `ReportMeta` 数据结构传递元数据\n- CSS 调整为更现代化的视觉风格（左色条 H2、卡片背景）\n- 邮件正文兼容 Gmail / iOS Mail（table-layout 排版）\n\n## dashboard-v2\n\n推进了**前端状态徽标**的设计与实现，覆盖工作区与 LLM 源主页。每张卡片右上角现在能一眼看到 `已配置 / 测试中 / 可用 / 失败` 等状态。\n\n> 设计原则：状态信息要可读，但不抢眼。\n\n## infra/terraform\n\n升级 `provider aws` 到 5.x，跑通 plan/apply。新增 staging 环境的 IAM 角色定义。\n\n## docs-site\n\n补齐 SSH 配置文档，覆盖 Windows / macOS / Linux 三平台。\n\n## 下周计划\n\n- 完成定时任务的失败重试与系统通知\n- 实验 API key keyring 存储（替换明文）\n";
+        let html = render_html_with_meta(md, &meta);
+        std::fs::write("/tmp/sample-meta.html", &html).unwrap();
+        eprintln!(
+            "Sample HTML written to /tmp/sample-meta.html ({} bytes)",
+            html.len()
+        );
     }
 
     #[tokio::test]

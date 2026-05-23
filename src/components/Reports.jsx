@@ -27,21 +27,40 @@ import {
 } from './ui.jsx';
 import { formatIsoMinute as formatTs } from '../utils.js';
 
-export default function Reports() {
+export default function Reports({ onOpenGenerate }) {
   const { t } = useTranslation();
   const [items, loading, reload] = useAsyncState(listReports, []);
   const [openId, setOpenId] = useState(null);
 
+  const count = items?.length || 0;
   return (
     <div>
-      <header className="mb-6">
-        <h1 className="text-2xl font-medium text-stone-900">{t('reports.title')}</h1>
-        <p className="mt-1 text-[13px] text-stone-500">{t('reports.subtitle')}</p>
+      <header className="mb-6 flex items-end justify-between">
+        <div>
+          <h1 className="text-2xl font-medium text-stone-900">
+            {t('reports.title')}
+            {count > 0 && (
+              <span className="ml-2 text-[13px] font-normal text-stone-400">· {count}</span>
+            )}
+          </h1>
+          <p className="mt-1 text-[13px] text-stone-500">{t('reports.subtitle')}</p>
+        </div>
+        {count > 0 && onOpenGenerate && (
+          <PrimaryButton onClick={onOpenGenerate}>
+            <Icon name="sparkle" size={15} /> {t('sidebar.generate')}
+          </PrimaryButton>
+        )}
       </header>
 
       {loading && <LoadingState />}
       {!loading && items && items.length === 0 && (
-        <EmptyState iconName="report" message={t('reports.empty')} />
+        <EmptyState iconName="report" message={t('reports.empty')}>
+          {onOpenGenerate && (
+            <PrimaryButton onClick={onOpenGenerate}>
+              <Icon name="sparkle" size={15} /> {t('reports.empty_cta')}
+            </PrimaryButton>
+          )}
+        </EmptyState>
       )}
       {!loading && items && items.length > 0 && (
         <ReportTable items={sortByDateDesc(items)} onOpen={setOpenId} />

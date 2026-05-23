@@ -28,6 +28,7 @@ import {
   PrimaryButton,
   SecondaryButton,
   StatusBanner,
+  StatusPill,
 } from './ui.jsx';
 
 const TOOLS = [
@@ -39,6 +40,9 @@ export default function Workspaces() {
   const { t } = useTranslation();
   const [items, loading, reload] = useAsyncState(listWorkspaces, []);
   const [editing, setEditing] = useState(null); // null | {} (new) | workspace object
+  // 会话级连接状态：id → { state: 'idle'|'testing'|'ok'|'failed', message }
+  // 不持久化（重启清空），避免给"曾测过"造成假信号。
+  const [testStatus, setTestStatus] = useState({});
 
   async function handleDelete(ws) {
     if (!confirm(t('workspaces.confirm_delete', { name: ws.name }))) return;
@@ -47,6 +51,19 @@ export default function Workspaces() {
       reload();
     } catch (e) {
       alert(formatError(e));
+    }
+  }
+
+  async function handleTest(ws) {
+    setTestStatus((prev) => ({ ...prev, [ws.id]: { state: 'testing' } }));
+    try {
+      const msg = await testWorkspaceConnection(ws);
+      setTestStatus((prev) => ({ ...prev, [ws.id]: { state: 'ok', message: msg } }));
+    } catch (e) {
+      setTestStatus((prev) => ({
+        ...prev,
+        [ws.id]: { state: 'failed', message: formatError(e) },
+      }));
     }
   }
 
@@ -72,8 +89,10 @@ export default function Workspaces() {
             <WorkspaceCard
               key={ws.id}
               workspace={ws}
+              status={testStatus[ws.id]}
               onEdit={() => setEditing(ws)}
               onDelete={() => handleDelete(ws)}
+              onTest={() => handleTest(ws)}
             />
           ))}
         </div>
@@ -93,16 +112,41 @@ export default function Workspaces() {
   );
 }
 
-function WorkspaceCard({ workspace, onEdit, onDelete }) {
+function WorkspaceCard({ workspace, status, onEdit, onDelete, onTest }) {
   const { t } = useTranslation();
   const isLocal = workspace.type === 'local';
+  // 本地工作区始终视为就绪（无网络可断）；SSH 默认"未测试"，由 status 覆盖。
+  const pill = (() => {
+    const st = status?.state;
+    if (isLocal) {
+      return { tone: 'success', label: t('workspaces.card.status.local') };
+    }
+    if (st === 'testing') {
+      return { tone: 'info', label: t('workspaces.card.status.testing'), pulse: true };
+    }
+    if (st === 'ok') {
+      return { tone: 'success', label: t('workspaces.card.status.ok'), title: status.message };
+    }
+    if (st === 'failed') {
+      return { tone: 'error', label: t('workspaces.card.status.failed'), title: status.message };
+    }
+    return { tone: 'neutral', label: t('workspaces.card.status.untested') };
+  })();
+  const testing = status?.state === 'testing';
   return (
     <div className="flex items-start gap-3 rounded-lg border border-stone-200 bg-white p-5 hover:border-stone-300">
-      <div className="mt-0.5 flex h-9 w-9 items-center justify-center rounded-lg bg-stone-100 text-stone-500">
+      <div
+        className={`mt-0.5 flex h-9 w-9 items-center justify-center rounded-lg ${
+          isLocal ? 'bg-emerald-50 text-emerald-700' : 'bg-stone-100 text-stone-500'
+        }`}
+      >
         <Icon name={isLocal ? 'laptop' : 'server'} size={18} />
       </div>
       <div className="flex-1 overflow-hidden">
-        <div className="text-[14px] font-medium text-stone-900">{workspace.name}</div>
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-[14px] font-medium text-stone-900">{workspace.name}</span>
+          <StatusPill tone={pill.tone} label={pill.label} title={pill.title} pulse={pill.pulse} />
+        </div>
         <div className="mt-0.5 text-[12px] text-stone-500">
           {isLocal
             ? t('workspaces.card.local_label')
@@ -124,8 +168,18 @@ function WorkspaceCard({ workspace, onEdit, onDelete }) {
             <span className="font-mono text-[11px] text-stone-500">{workspace.claude_path}</span>
           )}
         </div>
+        {status?.state === 'failed' && status.message && (
+          <div className="mt-2 line-clamp-2 text-[11.5px] text-rose-700">{status.message}</div>
+        )}
       </div>
       <div className="flex flex-col gap-1">
+        <IconButton
+          title={t('workspaces.card.test')}
+          onClick={onTest}
+          disabled={testing}
+        >
+          <Icon name="refresh" size={15} className={testing ? 'animate-spin' : ''} />
+        </IconButton>
         <IconButton title={t('workspaces.card.edit')} onClick={onEdit}>
           <Icon name="edit" size={15} />
         </IconButton>

@@ -278,6 +278,33 @@ export function ModalFooter({ children, className = '' }) {
 }
 
 // ============================================================
+// StatusPill — 小圆点 + 文字的状态徽标（卡片右上 / 行内）
+// ============================================================
+
+/// tone: 'success' | 'warning' | 'error' | 'info' | 'neutral'
+export function StatusPill({ tone = 'neutral', label, title, pulse = false }) {
+  const styles = {
+    success: { bg: 'bg-emerald-50', text: 'text-emerald-700', dot: 'bg-emerald-500' },
+    warning: { bg: 'bg-amber-50', text: 'text-amber-700', dot: 'bg-amber-500' },
+    error: { bg: 'bg-rose-50', text: 'text-rose-700', dot: 'bg-rose-500' },
+    info: { bg: 'bg-sky-50', text: 'text-sky-700', dot: 'bg-sky-500' },
+    neutral: { bg: 'bg-stone-100', text: 'text-stone-600', dot: 'bg-stone-400' },
+  };
+  const s = styles[tone] || styles.neutral;
+  return (
+    <span
+      title={title}
+      className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[11px] ${s.bg} ${s.text}`}
+    >
+      <span
+        className={`inline-block h-1.5 w-1.5 rounded-full ${s.dot} ${pulse ? 'animate-pulse' : ''}`}
+      />
+      <span>{label}</span>
+    </span>
+  );
+}
+
+// ============================================================
 // StatusBanner
 // ============================================================
 
