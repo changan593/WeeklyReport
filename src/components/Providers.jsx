@@ -30,6 +30,7 @@ import {
   SecondaryButton,
   Select,
   StatusBanner,
+  StatusPill,
 } from './ui.jsx';
 
 const KIND_I18N_KEYS = {
@@ -43,6 +44,8 @@ export default function Providers() {
   const [items, loading, reload] = useAsyncState(listProviders, []);
   const [presets, setPresets] = useState([]);
   const [editing, setEditing] = useState(null);
+  // 会话级测试状态：id → { state: 'idle'|'testing'|'ok'|'failed', message }
+  const [testStatus, setTestStatus] = useState({});
 
   useEffect(() => {
     llmPresets()
@@ -66,6 +69,19 @@ export default function Providers() {
       reload();
     } catch (e) {
       alert(formatError(e));
+    }
+  }
+
+  async function handleTest(p) {
+    setTestStatus((prev) => ({ ...prev, [p.id]: { state: 'testing' } }));
+    try {
+      const msg = await testProvider(p);
+      setTestStatus((prev) => ({ ...prev, [p.id]: { state: 'ok', message: msg } }));
+    } catch (e) {
+      setTestStatus((prev) => ({
+        ...prev,
+        [p.id]: { state: 'failed', message: formatError(e) },
+      }));
     }
   }
 
@@ -104,9 +120,11 @@ export default function Providers() {
             <ProviderCard
               key={p.id}
               provider={p}
+              status={testStatus[p.id]}
               onEdit={() => setEditing(p)}
               onDelete={() => handleDelete(p)}
               onSetDefault={() => setAsDefault(p)}
+              onTest={() => handleTest(p)}
             />
           ))}
         </div>
@@ -127,16 +145,23 @@ export default function Providers() {
   );
 }
 
-function ProviderCard({ provider, onEdit, onDelete, onSetDefault }) {
+function ProviderCard({ provider, status, onEdit, onDelete, onSetDefault, onTest }) {
   const { t } = useTranslation();
+  const pill = computeProviderPill(provider, status, t);
+  const testing = status?.state === 'testing';
   return (
     <div className="flex items-start gap-3 rounded-lg border border-stone-200 bg-white p-5 hover:border-stone-300">
-      <div className="mt-0.5 flex h-9 w-9 items-center justify-center rounded-lg bg-stone-100 text-stone-500">
+      <div
+        className={`mt-0.5 flex h-9 w-9 items-center justify-center rounded-lg ${
+          provider.is_default ? 'bg-amber-50 text-amber-700' : 'bg-stone-100 text-stone-500'
+        }`}
+      >
         <Icon name="llm" size={18} />
       </div>
       <div className="flex-1 overflow-hidden">
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-[14px] font-medium text-stone-900">{provider.name}</span>
+          <StatusPill tone={pill.tone} label={pill.label} title={pill.title} pulse={pill.pulse} />
           {provider.is_default && (
             <span className="inline-flex items-center gap-1 rounded bg-amber-50 px-1.5 py-0.5 text-[11px] text-amber-700">
               <Icon name="star" size={11} /> {t('providers.card.default_badge')}
@@ -162,6 +187,9 @@ function ProviderCard({ provider, onEdit, onDelete, onSetDefault }) {
             </span>
           )}
         </div>
+        {status?.state === 'failed' && status.message && (
+          <div className="mt-2 line-clamp-2 text-[11.5px] text-rose-700">{status.message}</div>
+        )}
       </div>
       <div className="flex flex-col items-end gap-1">
         {!provider.is_default && (
@@ -174,6 +202,9 @@ function ProviderCard({ provider, onEdit, onDelete, onSetDefault }) {
           </button>
         )}
         <div className="flex gap-0.5">
+          <IconButton title={t('providers.card.test')} onClick={onTest} disabled={testing}>
+            <Icon name="refresh" size={15} className={testing ? 'animate-spin' : ''} />
+          </IconButton>
           <IconButton title={t('providers.card.edit')} onClick={onEdit}>
             <Icon name="edit" size={15} />
           </IconButton>
@@ -184,6 +215,43 @@ function ProviderCard({ provider, onEdit, onDelete, onSetDefault }) {
       </div>
     </div>
   );
+}
+
+/// 决定 LLM 源卡片的状态徽标：
+/// - 缺 api_key / model / base_url → warning
+/// - 测试中 → info（pulse）
+/// - 测过成功 → success；失败 → error
+/// - 否则 → success（已配置但未测试）
+function computeProviderPill(provider, status, t) {
+  const st = status?.state;
+  if (st === 'testing') {
+    return { tone: 'info', label: t('providers.card.status.testing'), pulse: true };
+  }
+  if (st === 'ok') {
+    return {
+      tone: 'success',
+      label: t('providers.card.status.ok'),
+      title: status.message,
+    };
+  }
+  if (st === 'failed') {
+    return {
+      tone: 'error',
+      label: t('providers.card.status.failed'),
+      title: status.message,
+    };
+  }
+  // 未测过：检查配置完整度
+  if (!provider.api_key) {
+    return { tone: 'warning', label: t('providers.card.status.missing_key') };
+  }
+  if (!provider.model) {
+    return { tone: 'warning', label: t('providers.card.status.missing_model') };
+  }
+  if (!provider.base_url) {
+    return { tone: 'warning', label: t('providers.card.status.missing_url') };
+  }
+  return { tone: 'success', label: t('providers.card.status.configured') };
 }
 
 function emptyProvider() {

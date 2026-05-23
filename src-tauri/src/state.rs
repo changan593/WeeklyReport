@@ -130,6 +130,7 @@ mod tests {
         let s = Settings {
             prompt_clip_chars: 300,
             past_reports_context: 4,
+            language: "zh-CN".to_string(),
         };
         save_settings(&s).unwrap();
         let loaded = get_settings().unwrap();

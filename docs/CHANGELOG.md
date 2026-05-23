@@ -7,7 +7,44 @@
 
 ## [Unreleased]
 
-无。
+一次 UI/UX 打磨：工作区与 LLM 源主页加状态徽标；报告 HTML（详情页 / 定时邮件）重做，
+带统计卡片与按项目条形图；其余页面做轻量产品向优化。
+
+### Added
+- **README 发版速览表**：英文与中文 README 都新增 "Releases / 发版速览" 板块，
+  每版一行 highlight，便于点开仓库 30 秒掌握当前版本边界。
+- **HTML 报告美化（`email.rs`）**：
+  - 新增 `ReportMeta` 数据结构 + `render_html_with_meta(md, meta)` 渲染函数
+  - 顶部统计卡片：项目数 / Tokens / LLM 源 / 生成时间，4 个 stat tile
+  - 按项目工作量条形图（Top 8，CSS-only，无 JS，邮件客户端兼容）
+  - 视觉重做：H1 黑色下划线 / H2 翠绿色左色条 / 改良 code blockquote 样式
+  - `tokens_used` 大数字自动 `1.2k / 3.4M` 压缩显示
+- **会话级状态徽标**：
+  - 工作区卡片：本地→"本地就绪"（emerald）/ SSH→"未测试 → 测试中 → 连接正常 / 失败"
+    四态切换；卡片右上加内联"测试"按钮（spinning refresh icon）
+  - LLM 源卡片：自动检测配置完整度（`api_key` / `model` / `base_url`），
+    显示"缺少 API key"等具体短语；测试成功/失败状态覆盖；卡片右上加内联"测试"按钮
+- **次级页面打磨**：
+  - 报告列表标题加总数计数；空态加 "生成第一份周报" CTA 按钮
+  - 定时任务：SMTP 未配置横幅加 "去设置" 跳转按钮；卡片状态由文本改为
+    StatusPill（已停用 / 已调度 / 上次成功 / 上次失败）
+  - 模板：卡片自动统计 "已被 N 个定时任务引用"，删除前一目了然
+
+### Changed
+- `EmailRequest` 新增可选 `body_meta: Option<ReportMeta>` 字段；scheduler 经
+  `GenerationOutput.meta` 传过来，让定时邮件复用美化 HTML
+- `report::get_report_html` 对旧报告（无 cached html）自动构造 `ReportMeta`
+  从 `ReportRecord` 读取统计信息（无 by_project 快照，所以不渲染条形图）
+
+### Fixed
+- 既有单元测试两处编译错误（`LogItem` 缺 `reply/server`、`Settings` 缺 `language`），
+  原来阻止 `cargo test` 直接通过，现在 243 个测试全绿
+
+### 设计取舍
+- 渲染器仍按 ADR-007 保持自写极简版，新功能只是在 `wrap_html` 外层包装 +
+  追加一个 header HTML 片段，未引入 `pulldown-cmark` 等第三方库
+- 状态徽标走会话级 React state，**不持久化**——避免给"曾测过"造成假信号；
+  下次启动应用，所有 SSH 工作区都重新显示为"未测试"
 
 ---
 

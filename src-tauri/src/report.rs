@@ -89,6 +89,9 @@ pub struct CollectionOutput {
 
 /// 完整生成流程的输出。`skipped_*` 是解析阶段计数，用于让 UI 提示用户
 /// "扫了 N 行但 M 行损坏没认出来"，避免静默丢数据。
+///
+/// `meta` 字段不下发到前端（前端用不到），仅供后端 scheduler→email 路径
+/// 串联，让定时邮件复用美化版 HTML（带统计卡 + 按项目条形图）。
 #[derive(Debug, Clone, Serialize)]
 pub struct GenerationOutput {
     pub record: ReportRecord,
@@ -96,6 +99,8 @@ pub struct GenerationOutput {
     pub duration_ms: u64,
     pub skipped_lines: u32,
     pub skipped_files: u32,
+    #[serde(skip)]
+    pub meta: email::ReportMeta,
 }
 
 /// 第一步：扫日志 → 聚合 → 返回带 timestamp 的 `Summary`。
@@ -209,7 +214,8 @@ pub async fn render_from_summary(
 
     // 同时存 HTML（供 Reports 详情 HTML 预览 / 复制 HTML）。
     // 渲染失败不阻塞主路径 —— 旧报告 / 渲染失败时 get_report_html 会现场再渲染。
-    let html = email::render_html(&markdown);
+    let meta = build_report_meta(&saved, &summary_for_prompt);
+    let html = email::render_html_with_meta(&markdown, &meta);
     if let Err(e) = store::save_report_html_file(&saved.id, &html) {
         tracing::warn!("保存报告 HTML 失败 {}: {:#}", saved.id, e);
     }
@@ -220,19 +226,57 @@ pub async fn render_from_summary(
         duration_ms,
         skipped_lines: summary_for_prompt.stats.skipped_lines,
         skipped_files: summary_for_prompt.stats.skipped_files,
+        meta,
     })
 }
 
 /// 取报告 HTML：优先用磁盘上的 `<id>.html`，没有就从 `.md` 现场渲染。
 ///
 /// 用于 Reports 详情的 HTML 预览 + 复制 HTML 功能。旧报告（本 PR 之前生成）
-/// 没有 .html 文件，按需 fallback 现场渲染。
+/// 没有 .html 文件，按需 fallback 现场渲染：尝试用 `ReportRecord` 元数据
+/// 渲染美化版（无按项目条形图，因为旧报告未存 by_project 快照）；
+/// 元数据查不到时退回最简版。
 pub fn get_report_html(id: &str) -> Result<String> {
     if let Some(cached) = store::load_report_html_file(id)? {
         return Ok(cached);
     }
     let md = store::load_report_file(id)?;
-    Ok(email::render_html(&md))
+    let record = state::list_reports()?.into_iter().find(|r| r.id == id);
+    match record {
+        Some(r) => {
+            let meta = email::ReportMeta {
+                week: r.week,
+                project_count: r.project_count,
+                tokens_used: r.tokens_used,
+                provider_name: r.provider_name,
+                generated_at: r.generated_at,
+                project_breakdown: Vec::new(),
+            };
+            Ok(email::render_html_with_meta(&md, &meta))
+        }
+        None => Ok(email::render_html(&md)),
+    }
+}
+
+/// 从 `ReportRecord` + `Summary` 构造邮件用的 `ReportMeta`（含按项目条形图数据）。
+///
+/// 公开仅为 scheduler/email 路径复用，外部不应依赖。
+pub fn build_report_meta(record: &ReportRecord, summary: &Summary) -> email::ReportMeta {
+    let mut breakdown: Vec<(String, u32)> = summary
+        .by_project
+        .iter()
+        .map(|(k, v)| (k.clone(), v.len() as u32))
+        .collect();
+    // 排序由 render_meta_header 内部再做一遍（容错），这里先排稳定一下。
+    breakdown.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    email::ReportMeta {
+        week: record.week.clone(),
+        project_count: record.project_count,
+        tokens_used: record.tokens_used,
+        provider_name: record.provider_name.clone(),
+        generated_at: record.generated_at.clone(),
+        project_breakdown: breakdown,
+    }
 }
 
 /// 编辑后用户可能删/增条目，按当前 by_project 重算 prompt 数 / 项目数 / 主项目。
@@ -639,7 +683,9 @@ mod tests {
             id: "x".into(),
             timestamp: None,
             source: "manual".into(),
+            server: String::new(),
             text: "用户手动新增的内容".into(),
+            reply: None,
             manual: true,
         };
         s.by_project.insert("misc".into(), vec![item_no_ts]);

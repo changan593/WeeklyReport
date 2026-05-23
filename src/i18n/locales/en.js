@@ -85,6 +85,7 @@ export default {
     title: 'Reports',
     subtitle: 'Every generated report is archived locally and can be used as a style reference for the next generation.',
     empty: 'No reports generated yet',
+    empty_cta: 'Generate your first report',
     columns: {
       range: 'Date range',
       template: 'Template',
@@ -121,6 +122,14 @@ export default {
       local_label: 'Local machine',
       edit: 'Edit',
       delete: 'Delete',
+      test: 'Test connection',
+      status: {
+        local: 'Local ready',
+        untested: 'Untested',
+        testing: 'Testing…',
+        ok: 'Connected',
+        failed: 'Failed',
+      },
     },
     editor: {
       title_new: 'Add workspace',
@@ -163,6 +172,16 @@ export default {
       set_default: 'Set as default',
       edit: 'Edit',
       delete: 'Delete',
+      test: 'Test connection',
+      status: {
+        configured: 'Configured',
+        missing_key: 'Missing API key',
+        missing_model: 'Missing model',
+        missing_url: 'Missing base_url',
+        testing: 'Testing…',
+        ok: 'Ready',
+        failed: 'Test failed',
+      },
     },
     editor: {
       title_new: 'Add LLM source',
@@ -200,6 +219,8 @@ export default {
       delete: 'Delete',
       edit_disabled: 'Built-in templates cannot be edited',
       delete_disabled: 'Built-in templates cannot be deleted',
+      used_by: 'Used by {n} schedule(s)',
+      used_by_tip: 'Referenced by schedules; deleting will fall back to default template.',
     },
     default_sections: { overview: 'This week', plan: 'Next week' },
     editor: {
@@ -230,6 +251,7 @@ export default {
     empty: 'No schedules yet',
     confirm_delete: 'Delete schedule "{name}"?',
     no_smtp_warning: '⚠ SMTP not configured (cannot send email). Set it up in Settings.',
+    go_settings: 'Open settings',
     card: {
       recipients: '{n} recipient(s)',
       cc: '{n} cc',
@@ -238,6 +260,12 @@ export default {
       run_now: 'Run now',
       edit: 'Edit',
       delete: 'Delete',
+      status: {
+        disabled: 'Disabled',
+        scheduled: 'Scheduled',
+        ok: 'Last run ok',
+        failed: 'Last run failed',
+      },
     },
     preset: {
       friday: 'Fri 17:30 UTC',

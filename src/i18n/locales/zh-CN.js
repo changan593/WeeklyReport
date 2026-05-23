@@ -85,6 +85,7 @@ export default {
     title: '历史周报',
     subtitle: '所有生成的周报都会本地存档，可作为下次生成的风格参考',
     empty: '还没有生成过任何周报',
+    empty_cta: '生成第一份周报',
     columns: {
       range: '时间范围',
       template: '模板',
@@ -121,6 +122,14 @@ export default {
       local_label: '本地机器',
       edit: '编辑',
       delete: '删除',
+      test: '测试连接',
+      status: {
+        local: '本地就绪',
+        untested: '未测试',
+        testing: '测试中…',
+        ok: '连接正常',
+        failed: '连接失败',
+      },
     },
     editor: {
       title_new: '添加工作区',
@@ -163,6 +172,16 @@ export default {
       set_default: '设为默认',
       edit: '编辑',
       delete: '删除',
+      test: '测试连接',
+      status: {
+        configured: '已配置',
+        missing_key: '缺少 API key',
+        missing_model: '缺少 model',
+        missing_url: '缺少 base_url',
+        testing: '测试中…',
+        ok: '可用',
+        failed: '测试失败',
+      },
     },
     editor: {
       title_new: '添加 LLM 源',
@@ -200,6 +219,8 @@ export default {
       delete: '删除',
       edit_disabled: '内置模板不可编辑',
       delete_disabled: '内置模板不可删除',
+      used_by: '{n} 个定时任务',
+      used_by_tip: '已被定时任务引用，删除会使任务回退到默认模板',
     },
     default_sections: { overview: '本周概览', plan: '下周计划' },
     editor: {
@@ -230,6 +251,7 @@ export default {
     empty: '还没有定时任务',
     confirm_delete: '删除定时任务「{name}」？',
     no_smtp_warning: '⚠ 尚未配置 SMTP（无法发送邮件），请到「设置」页填写。',
+    go_settings: '去设置',
     card: {
       recipients: '{n} 个收件人',
       cc: '{n} 个抄送',
@@ -238,6 +260,12 @@ export default {
       run_now: '立即执行',
       edit: '编辑',
       delete: '删除',
+      status: {
+        disabled: '已停用',
+        scheduled: '已调度',
+        ok: '上次成功',
+        failed: '上次失败',
+      },
     },
     preset: {
       friday: '每周五 17:30 UTC',

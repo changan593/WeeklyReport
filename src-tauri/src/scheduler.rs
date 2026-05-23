@@ -208,6 +208,7 @@ async fn run_once(sch: &Schedule) -> Result<String> {
         cc: sch.cc.clone(),
         subject,
         body_markdown: output.content,
+        body_meta: Some(output.meta),
     };
     email::send(&smtp, &email_req).await?;
 

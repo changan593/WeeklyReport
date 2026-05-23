@@ -395,6 +395,7 @@ async fn send_test_email(req: TestEmailRequest) -> Result<String, String> {
                 ("time", time.as_str()),
             ],
         ),
+        body_meta: None,
     };
     email::send(&req.config, &body)
         .await
