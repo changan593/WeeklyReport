@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { formatError, formatIsoMinute, splitEmails } from './utils.js';
+import { formatError, formatIsoMinute, splitEmails, withTimeout } from './utils.js';
 
 describe('splitEmails', () => {
   it('splits on comma', () => {
@@ -83,5 +83,34 @@ describe('formatError', () => {
     // 不抛错；具体格式不限，只要是 string
     expect(typeof out).toBe('string');
     expect(out.length).toBeGreaterThan(0);
+  });
+});
+
+describe('withTimeout', () => {
+  it('resolves when underlying promise settles in time', async () => {
+    const v = await withTimeout(Promise.resolve(42), 1000);
+    expect(v).toBe(42);
+  });
+
+  it('propagates underlying rejection without timing out first', async () => {
+    await expect(
+      withTimeout(Promise.reject(new Error('boom')), 1000),
+    ).rejects.toThrow('boom');
+  });
+
+  it('rejects with timeout error if underlying takes too long', async () => {
+    const slow = new Promise((resolve) => setTimeout(resolve, 200));
+    await expect(withTimeout(slow, 20, '连接测试')).rejects.toThrow(/连接测试.*超时/);
+  });
+
+  it('marks timeout errors with err.timeout = true', async () => {
+    const slow = new Promise(() => {}); // never settles
+    try {
+      await withTimeout(slow, 20);
+    } catch (e) {
+      expect(e.timeout).toBe(true);
+      return;
+    }
+    throw new Error('should have thrown');
   });
 });

@@ -12,6 +12,7 @@ import {
   useAsyncState,
   formatError,
 } from '../api.js';
+import { withTimeout } from '../utils.js';
 import { useTranslation } from '../i18n/index.jsx';
 import {
   EmptyState,
@@ -57,9 +58,15 @@ export default function Workspaces() {
   async function handleTest(ws) {
     setTestStatus((prev) => ({ ...prev, [ws.id]: { state: 'testing' } }));
     try {
-      const msg = await testWorkspaceConnection(ws);
+      // 前端超时兜底：避免后端 ssh 子进程异常时 UI 卡死在「测试中」。
+      // 后端本身有 ConnectTimeout=8s，理论 ≤ 20s 必返；这里给 45s 留足余量。
+      const msg = await withTimeout(testWorkspaceConnection(ws), 45_000);
       setTestStatus((prev) => ({ ...prev, [ws.id]: { state: 'ok', message: msg } }));
     } catch (e) {
+      // 把原始错误也输出到 DevTools console，方便排查
+      // （UI 上只展示精简一行；详细 stack 在控制台里看）
+      // eslint-disable-next-line no-console
+      console.error('[workspace test failed]', ws?.id, e);
       setTestStatus((prev) => ({
         ...prev,
         [ws.id]: { state: 'failed', message: formatError(e) },

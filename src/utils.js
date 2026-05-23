@@ -30,3 +30,26 @@ export function formatError(e) {
     return String(e);
   }
 }
+
+/// 给 Promise 加超时上限：到点没 settle 就 reject 一个带 `timeout` 标记的错误。
+/// 用于内联连接测试这类「后端理论必返但万一卡住要救场」的场景。
+export function withTimeout(promise, ms, label) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      const err = new Error(
+        `${label || '请求'}超时（${Math.round(ms / 1000)} 秒）`,
+      );
+      err.timeout = true;
+      reject(err);
+    }, ms);
+    promise
+      .then((v) => {
+        clearTimeout(timer);
+        resolve(v);
+      })
+      .catch((e) => {
+        clearTimeout(timer);
+        reject(e);
+      });
+  });
+}

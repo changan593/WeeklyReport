@@ -482,6 +482,18 @@ fn base_ssh_args(ws: &Workspace) -> Vec<String> {
         "StrictHostKeyChecking=no".into(),
         "-o".into(),
         format!("ConnectTimeout={CONNECT_TIMEOUT_SECS}"),
+        // 显式禁用 ssh 连接复用（ControlMaster）。
+        //
+        // 如果用户 ~/.ssh/config 里启用了 `ControlMaster auto` + `ControlPersist`,
+        // 子进程 ssh 会在背后 fork 一个 master 守护进程，stdout 文件描述符被它
+        // 持有不关 —— `tokio::process::Command::output().await` 因此永远等不到 EOF,
+        // 表现为前端「测试中」卡死，即使 ssh 本身已经能连上。
+        //
+        // 用 `ControlPath=none` 同时切断 socket，确保无论用户怎么配都不复用。
+        "-o".into(),
+        "ControlMaster=no".into(),
+        "-o".into(),
+        "ControlPath=none".into(),
     ];
     match ws.auth_method {
         SshAuthMethod::Key => {
@@ -599,6 +611,10 @@ mod tests {
         assert!(joined.contains("BatchMode=yes"));
         assert!(joined.contains("StrictHostKeyChecking=no"));
         assert!(joined.contains("ConnectTimeout=8"));
+        // 显式关掉 ssh 连接复用，否则用户 ~/.ssh/config 里启用了 ControlMaster auto
+        // 会让 cmd.output().await 永远等不到 EOF（master 守护进程持着 stdout）。
+        assert!(joined.contains("ControlMaster=no"));
+        assert!(joined.contains("ControlPath=none"));
         assert!(joined.contains("-p 2200"));
         assert!(joined.contains("-i "));
     }
