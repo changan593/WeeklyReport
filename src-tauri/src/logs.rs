@@ -308,7 +308,27 @@ pub fn aggregate_with_stats(mut messages: Vec<Message>, parse_stats: ParseStats)
                 }
                 if let Some(prev) = last_text_per_project.get(&m.project) {
                     if prefix_match(prev, &m.text, 30) {
-                        continue; // 相邻重复，跳过
+                        // 相邻重复，跳过当前条 —— 但要把它的 reply 抢救给前一条。
+                        //
+                        // 背景：Claude Code 同一条用户指令同时存在于 history.jsonl
+                        // （无 assistant 配对）和 projects/<sid>/<id>.jsonl
+                        // （有 assistant 配对）。原逻辑「先入者赢」会让 history 的
+                        // 无回复版本占座，session 的有回复版本被当重复扔掉 —— 表现
+                        // 就是 Claude Code 条目永远没 AI 回复。
+                        //
+                        // 这里在丢弃前用 `bubble up reply` 策略：前一条没 reply、
+                        // 当前条有 reply → 写到前一条上。Codex 单源不受影响。
+                        if m.reply.is_some() {
+                            if let Some(prev_item) = by_project
+                                .get_mut(&m.project)
+                                .and_then(|items| items.last_mut())
+                            {
+                                if prev_item.reply.is_none() {
+                                    prev_item.reply = m.reply.clone();
+                                }
+                            }
+                        }
+                        continue;
                     }
                 }
                 last_text_per_project.insert(m.project.clone(), m.text.clone());
@@ -569,6 +589,40 @@ mod tests {
         ];
         let s = aggregate(msgs);
         assert_eq!(s.by_project["a"].len(), 2, "相邻重复应去重");
+    }
+
+    #[test]
+    fn aggregate_dedup_bubbles_reply_from_session_into_history_entry() {
+        // 模拟 Claude Code 双源：history.jsonl 的同一条指令（无 reply）
+        // 排在前面、session jsonl 的同一条指令（有 reply）排在后面。
+        // 期望：保留前者（time 早），但 reply 被后者补上。
+        let mut hist = msg(Role::User, "weekly-report", "把卡片状态改为绿色", 1);
+        hist.reply = None;
+        let mut sess = msg(Role::User, "weekly-report", "把卡片状态改为绿色", 1);
+        sess.reply = Some("已把 enabled=true 的卡片背景改成 emerald-50".into());
+
+        let s = aggregate(vec![hist, sess]);
+        let items = &s.by_project["weekly-report"];
+        assert_eq!(items.len(), 1, "重复应去重");
+        assert_eq!(
+            items[0].reply.as_deref(),
+            Some("已把 enabled=true 的卡片背景改成 emerald-50"),
+            "session 的 reply 应该被抢救回来"
+        );
+    }
+
+    #[test]
+    fn aggregate_dedup_does_not_clobber_existing_reply() {
+        // 第一条已经有 reply 时不应被第二条覆盖（避免拿质量更差的回复）
+        let mut a = msg(Role::User, "x", "跑一下 cargo test", 1);
+        a.reply = Some("good reply".into());
+        let mut b = msg(Role::User, "x", "跑一下 cargo test", 1);
+        b.reply = Some("worse reply".into());
+
+        let s = aggregate(vec![a, b]);
+        let items = &s.by_project["x"];
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].reply.as_deref(), Some("good reply"));
     }
 
     #[test]
