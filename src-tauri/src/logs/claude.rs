@@ -216,6 +216,11 @@ pub(crate) fn parse_session_line(
     match t {
         "user" => parse_user_line(&v, server, project, project_path, ts),
         "assistant" => parse_assistant_line(&v, server, project, project_path, ts, clip_chars),
+        // attachment 的子类型 queued_command 是用户排队后实际"出队发送"的 prompt，
+        // 没有对应的 `"type":"user"` 行，必须从 attachment 里抽出来当 user 处理。
+        // 其它 attachment 子类型（task_reminder / skill_listing / file 等）都是
+        // 工具注入，不算用户内容。
+        "attachment" => parse_attachment_line(&v, server, project, project_path, ts),
         // summary / git-commit / 其他未知 type 全部丢弃
         _ => Vec::new(),
     }
@@ -253,6 +258,65 @@ fn parse_user_line(
     vec![Message {
         role: Role::User,
         text,
+        ts,
+        project: project.to_string(),
+        project_path: project_path.map(String::from),
+        // 由 pair_replies 在 session 内配对填充
+        reply: None,
+        tool: Tool::ClaudeCode,
+        server: server.to_string(),
+    }]
+}
+
+/// 把 `"type":"attachment"` 中 `attachment.type == "queued_command"` 的 prompt 提取为 user。
+///
+/// Claude Code CLI 允许用户在 AI 仍在执行时把下一条 prompt 排队（queue）。
+/// 排队时只写 `queue-operation`（不带 type:user），真正"发送"的瞬间会写一条
+/// `type:"attachment"`，子类型为 `queued_command`，prompt 字段就是要发送给 AI 的文本。
+/// 这种 prompt 在 session jsonl 里**没有**对应的 `"type":"user"` 行，必须在这里抽取。
+fn parse_attachment_line(
+    v: &Value,
+    server: &str,
+    project: &str,
+    project_path: Option<&str>,
+    ts: Option<DateTime<Local>>,
+) -> Vec<Message> {
+    let attachment = match v.get("attachment") {
+        Some(a) => a,
+        None => return Vec::new(),
+    };
+    if attachment.get("type").and_then(|t| t.as_str()) != Some("queued_command") {
+        return Vec::new();
+    }
+    // prompt 可能是 string（纯文本）或 array（带图片/附件时是 content blocks）
+    let prompt_val = match attachment.get("prompt") {
+        Some(p) => p,
+        None => return Vec::new(),
+    };
+    let prompt = match prompt_val {
+        Value::String(s) => s.trim().to_string(),
+        Value::Array(arr) => {
+            // 数组形态：抽出所有 type=="text" 块拼接（image 块跳过）
+            let parts: Vec<&str> = arr
+                .iter()
+                .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("text"))
+                .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .collect();
+            if parts.is_empty() {
+                return Vec::new();
+            }
+            parts.join("\n")
+        }
+        _ => return Vec::new(),
+    };
+    if prompt.is_empty() {
+        return Vec::new();
+    }
+    vec![Message {
+        role: Role::User,
+        text: prompt,
         ts,
         project: project.to_string(),
         project_path: project_path.map(String::from),
@@ -495,5 +559,51 @@ mod tests {
         let v = serde_json::json!({"weird_key": "weird value"});
         let arg = extract_tool_use_key_arg(Some(&v));
         assert_eq!(arg.as_deref(), Some("weird value"));
+    }
+
+    // -------- parse_attachment_line: queued_command 抽取 --------
+
+    #[test]
+    fn parse_attachment_extracts_queued_command_string_prompt() {
+        // Claude Code 把"用户排队后实际发出"的 prompt 写成 type:"attachment"
+        // + attachment.type:"queued_command"。session 里没有对应的 type:"user" 行。
+        let line = r#"{"type":"attachment","attachment":{"type":"queued_command","prompt":"mov可以转成mp4吗","commandMode":"prompt"},"timestamp":"2026-05-07T05:54:14.232Z","cwd":"G:\\Temp"}"#;
+        let msgs = parse_session_line(line, "srv", "Temp", Some("G:\\Temp"), 200);
+        assert_eq!(msgs.len(), 1, "queued_command 应被识别为一条 user");
+        assert_eq!(msgs[0].text, "mov可以转成mp4吗");
+        assert_eq!(msgs[0].role, Role::User);
+    }
+
+    #[test]
+    fn parse_attachment_extracts_queued_command_array_prompt() {
+        // 带图片时，attachment.prompt 是 content blocks 数组；
+        // 应抽出所有 text 块拼接，跳过 image 块。
+        let line = r#"{"type":"attachment","attachment":{"type":"queued_command","prompt":[{"type":"text","text":"不是简单的偏色，而是变成黑白了，比如[Image #1]"},{"type":"image","source":{"type":"base64","media_type":"image/jpeg","data":"/9j/4AAQ..."}}]},"timestamp":"2026-05-07T06:11:54.501Z","cwd":"G:\\Temp"}"#;
+        let msgs = parse_session_line(line, "srv", "Temp", None, 200);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(
+            msgs[0].text,
+            "不是简单的偏色，而是变成黑白了，比如[Image #1]"
+        );
+    }
+
+    #[test]
+    fn parse_attachment_skips_non_queued_command_subtypes() {
+        // task_reminder / skill_listing / file 等都是工具注入，不算用户内容
+        for subtype in ["task_reminder", "skill_listing", "file", "date_change"] {
+            let line = format!(
+                r#"{{"type":"attachment","attachment":{{"type":"{}","content":"whatever"}},"timestamp":"2026-05-07T00:00:00.000Z"}}"#,
+                subtype
+            );
+            let msgs = parse_session_line(&line, "srv", "p", None, 200);
+            assert!(msgs.is_empty(), "{subtype} 不该被当 user");
+        }
+    }
+
+    #[test]
+    fn parse_attachment_skips_empty_prompt() {
+        let line = r#"{"type":"attachment","attachment":{"type":"queued_command","prompt":"   "},"timestamp":"2026-05-07T00:00:00.000Z"}"#;
+        let msgs = parse_session_line(line, "srv", "p", None, 200);
+        assert!(msgs.is_empty());
     }
 }

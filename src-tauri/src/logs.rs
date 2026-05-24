@@ -276,7 +276,10 @@ pub fn aggregate_with_stats(mut messages: Vec<Message>, parse_stats: ParseStats)
     let mut servers: BTreeSet<String> = BTreeSet::new();
     let mut tools: BTreeSet<String> = BTreeSet::new();
     let mut active_days: BTreeSet<String> = BTreeSet::new();
-    let mut last_text_per_project: HashMap<String, String> = HashMap::new();
+    // 每个项目的"上一条用户 prompt"：(text, ts)。ts 用于近时窗兜底匹配
+    // （history.jsonl 的纯占位符 vs session 同时刻完整内容的去重场景）。
+    let mut last_text_per_project: HashMap<String, (String, Option<DateTime<Local>>)> =
+        HashMap::new();
     let mut total_prompts: u32 = 0;
     // 每个项目的 cwd 投票：project → (path → 出现次数)；同名项目取票数最高的路径
     let mut path_votes: HashMap<String, HashMap<String, u32>> = HashMap::new();
@@ -306,8 +309,9 @@ pub fn aggregate_with_stats(mut messages: Vec<Message>, parse_stats: ParseStats)
                 if is_noise_prompt(&m.text) {
                     continue;
                 }
-                if let Some(prev) = last_text_per_project.get(&m.project) {
-                    if dedup_match(prev, &m.text, 30) {
+                if let Some((prev_text, prev_ts)) = last_text_per_project.get(&m.project) {
+                    let dm = dedup_match_ts(prev_text, *prev_ts, &m.text, m.ts, 30);
+                    if dm {
                         // 相邻重复，跳过当前条 —— 但要把它的 reply 抢救给前一条。
                         //
                         // 背景：Claude Code 同一条用户指令同时存在于 history.jsonl
@@ -331,7 +335,7 @@ pub fn aggregate_with_stats(mut messages: Vec<Message>, parse_stats: ParseStats)
                         continue;
                     }
                 }
-                last_text_per_project.insert(m.project.clone(), m.text.clone());
+                last_text_per_project.insert(m.project.clone(), (m.text.clone(), m.ts));
                 let item = LogItem {
                     id: Uuid::new_v4().to_string(),
                     timestamp: m.ts.map(|t| t.to_rfc3339()),
@@ -461,12 +465,19 @@ fn prefix_match(prev: &str, current: &str, n: usize) -> bool {
 }
 
 /// 去重比对：在 [`prefix_match`] 之上，对带「占位符」的 Claude / Codex 文本
-/// 做归一化，避免双源同一条指令因占位符内容不同而漏匹配。
+/// 做归一化，并在前缀对不上时退回比末尾，避免双源同一条指令漏匹配。
 ///
 /// 典型场景：Claude Code 的 `~/.claude/history.jsonl` 会把粘贴块压成
-/// `[Pasted text #2 +74 lines]`，session jsonl 则保留完整内容。两条只在
-/// 占位符那一段不同，前 30 字符对不上，原逻辑误判为不同指令。这里把占位符
-/// 整段抹掉再比较，能正确把这对识别为重复。
+/// `[Pasted text #2 +74 lines]`，session jsonl 把它**完整展开**成几千字。
+/// 两边只在占位符那一段不同，前 30 字符对不上，归一化后 session 那边还是
+/// 几千字粘贴内容（占位符其实没用到），仍然对不上；但用户真正的提问通常
+/// 在粘贴块之后（`...[Pasted text]，把这个换成五分制`），两边的**末尾**
+/// 完全相同。
+///
+/// 三阶段策略：
+/// 1. 原始前 N 字符相同 → 重复
+/// 2. 抹掉占位符后前 N 字符相同 → 重复
+/// 3. 抹掉占位符后末尾 N 字符相同（且含足够实质字符）→ 重复
 fn dedup_match(prev: &str, current: &str, n: usize) -> bool {
     if prefix_match(prev, current, n) {
         return true;
@@ -477,7 +488,89 @@ fn dedup_match(prev: &str, current: &str, n: usize) -> bool {
     if p_norm.trim().is_empty() || c_norm.trim().is_empty() {
         return false;
     }
-    prefix_match(&p_norm, &c_norm, n)
+    if prefix_match(&p_norm, &c_norm, n) {
+        return true;
+    }
+    suffix_match_meaningful(&p_norm, &c_norm, n)
+}
+
+/// 时间窗兜底的 [`dedup_match`] 版本。当 [`dedup_match`] 失败时，再尝试：
+/// 「`prev` 归一化后是空（纯占位符）+ 两条 ts 都已知且相差 ≤ [`DEDUP_TS_WINDOW_SECS`]」
+/// → 视为重复。
+///
+/// 典型场景：history.jsonl 把一整段长 prompt 压成 `[Pasted text #1 +100 lines]`，
+/// session jsonl 同一秒内记下完整内容。文本完全对不上，但时间几乎贴在一起。
+fn dedup_match_ts(
+    prev: &str,
+    prev_ts: Option<DateTime<Local>>,
+    current: &str,
+    current_ts: Option<DateTime<Local>>,
+    n: usize,
+) -> bool {
+    const DEDUP_TS_WINDOW_SECS: i64 = 10;
+    if dedup_match(prev, current, n) {
+        return true;
+    }
+    let (pts, cts) = match (prev_ts, current_ts) {
+        (Some(p), Some(c)) => (p, c),
+        _ => return false,
+    };
+    if (cts - pts).num_seconds().abs() > DEDUP_TS_WINDOW_SECS {
+        return false;
+    }
+    // 只在 prev 几乎全是占位符（归一化后空）时启用 ts 兜底
+    let p_norm = strip_paste_placeholders(prev);
+    if !p_norm.trim().is_empty() {
+        return false;
+    }
+    // current 必须有实质内容，避免两条都是空占位符相互瞎匹配
+    let c_norm = strip_paste_placeholders(current);
+    !c_norm.trim().is_empty()
+}
+
+/// 在两段归一化文本里找最长公共后缀（按 char 比较）。
+///
+/// 兜底用：粘贴块在文本中间时，前缀已经被几千字粘贴内容占满，比不到真实
+/// 提问，但用户的真实问题通常写在粘贴块**之后**，两边的末尾是同一段。这里
+/// 计算共同后缀的 char 数，要求：
+/// - 至少 [`MIN_MEANINGFUL_CHARS`] 个"实质字符"（字母/汉字/数字）
+/// - **长度差距足够大**（一边至少是另一边的 [`MIN_LENGTH_RATIO`] 倍），
+///   避免近似同长度的两条「只是开头一个字不同、剩下都一样」被瞎合并
+fn suffix_match_meaningful(prev: &str, current: &str, n: usize) -> bool {
+    const MIN_MEANINGFUL_CHARS: usize = 6;
+    // 长方至少是短方的 1.3 倍才允许走 suffix 兜底。
+    // 双源场景下短方（history 压缩版）和长方（session 展开版）几乎必然长度差距明显
+    // （展开几十字粘贴块后差距至少 1.3 倍），而长度近似的两条短指令通常是两条不同
+    // prompt，不该被瞎合并。用整数比例避免引入 float。
+    const MIN_LENGTH_RATIO_NUM: usize = 13;
+    const MIN_LENGTH_RATIO_DEN: usize = 10;
+    let p: Vec<char> = prev.chars().collect();
+    let c: Vec<char> = current.chars().collect();
+    if p.is_empty() || c.is_empty() {
+        return false;
+    }
+    let (short, long) = if p.len() < c.len() {
+        (p.len(), c.len())
+    } else {
+        (c.len(), p.len())
+    };
+    if long * MIN_LENGTH_RATIO_DEN < short * MIN_LENGTH_RATIO_NUM {
+        return false;
+    }
+    let cap = n.min(p.len()).min(c.len());
+    if cap == 0 {
+        return false;
+    }
+    let mut common = 0usize;
+    while common < cap && p[p.len() - 1 - common] == c[c.len() - 1 - common] {
+        common += 1;
+    }
+    if common == 0 {
+        return false;
+    }
+    let tail: &[char] = &p[p.len() - common..];
+    let meaningful = tail.iter().filter(|ch| ch.is_alphanumeric()).count();
+    meaningful >= MIN_MEANINGFUL_CHARS
 }
 
 /// 抹掉 Claude Code / Codex 把附件压缩成的占位符（pasted text / image 引用），
@@ -955,6 +1048,103 @@ mod tests {
     fn dedup_match_does_not_match_when_both_normalize_to_empty() {
         // 全是占位符的两条不该被认作"同一条"（无信息）
         assert!(!dedup_match("[Pasted text #1]", "[Image #2]", 30));
+    }
+
+    // -------- dedup_match：归一化后比末尾（suffix）兜底 --------
+
+    #[test]
+    fn dedup_match_falls_back_to_suffix_when_paste_in_middle() {
+        // 真实数据：history 把粘贴块整段压成占位符，但用户的真实问题写在粘贴块**之后**；
+        // session 那边把粘贴块**完整展开**，前缀几千字 SQL/python/表格，归一化前缀也对不上，
+        // 只有"两边末尾的真实提问段相同"。
+        let history = "[Pasted text #1 +27 lines]跑完了，你看一下";
+        let session_long: String = format!(
+            "{}\n{}",
+            "==============================================".repeat(10), // 模拟粘贴块前缀
+            "===跑完了，你看一下"
+        );
+        assert!(!prefix_match(history, &session_long, 30));
+        assert!(
+            dedup_match(history, &session_long, 30),
+            "归一化后两边末尾 跑完了，你看一下 应该命中 suffix 兜底"
+        );
+    }
+
+    #[test]
+    fn dedup_match_falls_back_to_suffix_with_paste_in_middle_of_both() {
+        // 粘贴块在中间，前缀都一样几个字（如 `然后可以再加一个gpt-5.4-mini，`），
+        // 之后的内容（占位符 vs 代码块）不一致；末尾用户的真实指令两边相同。
+        let history = "然后可以再加一个gpt-5.4-mini，[Pasted text #1 +18 lines]，然后我们所有评测都是这三个模型同时评测然后取平均。";
+        let session = "然后可以再加一个gpt-5.4-mini，from openai import OpenAI\nimport os\nclient = OpenAI(api_key=...)\nresp = client.chat.completions.create(model='gpt-5.4-mini', messages=[{'role':'user','content':'hi'}])\nprint(resp)\n，然后我们所有评测都是这三个模型同时评测然后取平均。";
+        assert!(
+            dedup_match(history, session, 30),
+            "前缀对不上 30 char，但末尾真实指令段一致，suffix 兜底应命中"
+        );
+    }
+
+    #[test]
+    fn dedup_match_suffix_requires_meaningful_chars() {
+        // 仅末尾几个标点/单字相同（"？"、"好的。"）不应认作重复
+        assert!(!dedup_match("你好吗？", "今天天气怎么样？", 30));
+        assert!(!dedup_match("可以。", "好的。", 30));
+    }
+
+    // -------- dedup_match_ts：纯占位符 history + 同时刻 session 全文的 ts 兜底 --------
+
+    #[test]
+    fn dedup_match_ts_matches_pure_placeholder_within_window() {
+        // history.jsonl 把整个长 prompt 压成 `[Pasted text #1 +100 lines]`，归一化后为空；
+        // session jsonl 同一秒内记下完整内容。文本完全没法匹配，但 ts 几乎贴在一起。
+        let ts1 = Local::now();
+        let ts2 = ts1 + Duration::milliseconds(3);
+        assert!(dedup_match_ts(
+            "[Pasted text #1 +100 lines]",
+            Some(ts1),
+            "任务：验证并完成 WeeklyReport 项目里 Claude Code 日志 reply 缺失/质量低的修复\n背景：...",
+            Some(ts2),
+            30,
+        ));
+    }
+
+    #[test]
+    fn dedup_match_ts_does_not_match_when_window_too_wide() {
+        // 同样的纯占位符 + 实文本，但 ts 差 1 分钟 → 不算同一条
+        let ts1 = Local::now();
+        let ts2 = ts1 + Duration::minutes(1);
+        assert!(!dedup_match_ts(
+            "[Pasted text #1 +100 lines]",
+            Some(ts1),
+            "完全不同的真实内容...",
+            Some(ts2),
+            30,
+        ));
+    }
+
+    #[test]
+    fn dedup_match_ts_does_not_match_when_prev_has_real_text() {
+        // ts 兜底只在 prev 归一化为空时启用。prev 含真实文字 + 占位符时不走 ts 兜底，
+        // 避免「同时刻两条不同指令」被瞎合并。
+        let ts1 = Local::now();
+        let ts2 = ts1 + Duration::milliseconds(50);
+        assert!(!dedup_match_ts(
+            "看下这个：[Pasted text #1]", // 归一化后还剩"看下这个："
+            Some(ts1),
+            "另一个完全不同的指令",
+            Some(ts2),
+            30,
+        ));
+    }
+
+    #[test]
+    fn dedup_match_ts_no_ts_means_no_fallback() {
+        // 缺 ts 时不应走兜底
+        assert!(!dedup_match_ts(
+            "[Pasted text #1 +100 lines]",
+            None,
+            "完整内容",
+            None,
+            30,
+        ));
     }
 
     #[test]
