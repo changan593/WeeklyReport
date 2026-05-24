@@ -307,7 +307,7 @@ pub fn aggregate_with_stats(mut messages: Vec<Message>, parse_stats: ParseStats)
                     continue;
                 }
                 if let Some(prev) = last_text_per_project.get(&m.project) {
-                    if prefix_match(prev, &m.text, 30) {
+                    if dedup_match(prev, &m.text, 30) {
                         // 相邻重复，跳过当前条 —— 但要把它的 reply 抢救给前一条。
                         //
                         // 背景：Claude Code 同一条用户指令同时存在于 history.jsonl
@@ -460,6 +460,67 @@ fn prefix_match(prev: &str, current: &str, n: usize) -> bool {
     p[..min] == c[..min]
 }
 
+/// 去重比对：在 [`prefix_match`] 之上，对带「占位符」的 Claude / Codex 文本
+/// 做归一化，避免双源同一条指令因占位符内容不同而漏匹配。
+///
+/// 典型场景：Claude Code 的 `~/.claude/history.jsonl` 会把粘贴块压成
+/// `[Pasted text #2 +74 lines]`，session jsonl 则保留完整内容。两条只在
+/// 占位符那一段不同，前 30 字符对不上，原逻辑误判为不同指令。这里把占位符
+/// 整段抹掉再比较，能正确把这对识别为重复。
+fn dedup_match(prev: &str, current: &str, n: usize) -> bool {
+    if prefix_match(prev, current, n) {
+        return true;
+    }
+    let p_norm = strip_paste_placeholders(prev);
+    let c_norm = strip_paste_placeholders(current);
+    // 抹掉占位符后任何一边变空就别再比了，避免无内容的瞎匹配
+    if p_norm.trim().is_empty() || c_norm.trim().is_empty() {
+        return false;
+    }
+    prefix_match(&p_norm, &c_norm, n)
+}
+
+/// 抹掉 Claude Code / Codex 把附件压缩成的占位符（pasted text / image 引用），
+/// 只用于去重比较；不改变 LogItem.text 实际存储。
+///
+/// 处理对象：
+/// - `[Pasted text #2 +74 lines]` / `[Pasted text #1]`
+/// - `[Image #1]`
+/// - `<image name=[Image #1]></image>`
+fn strip_paste_placeholders(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let rest = &s[i..];
+        // 命中 `[Pasted text` 或 `[Image` 起始 → 跳到下一个 `]`
+        let is_paste = rest.starts_with("[Pasted text");
+        let is_image = rest.starts_with("[Image");
+        if is_paste || is_image {
+            if let Some(end_rel) = rest.find(']') {
+                i += end_rel + 1;
+                continue;
+            }
+        }
+        // 命中 `<image ...>` 标签 → 跳到 `</image>` 之后；缺少闭合就跳到 `>`
+        if rest.starts_with("<image") {
+            if let Some(end_rel) = rest.find("</image>") {
+                i += end_rel + "</image>".len();
+                continue;
+            }
+            if let Some(end_rel) = rest.find('>') {
+                i += end_rel + 1;
+                continue;
+            }
+        }
+        // 普通字符按 char 推进，避免切到 UTF-8 字节中间
+        let ch = s[i..].chars().next().unwrap();
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
 /// 判断一条用户 prompt 是否为工具自动注入的噪音（非用户真实工作内容）。
 ///
 /// 已知噪音类型（均来自 Codex CLI）：
@@ -488,9 +549,13 @@ pub(crate) fn clip_tail(text: &str, max: usize) -> String {
 
 /// 在单个 session 的有序 Message 序列内，把每条 user 指令配上它引发的 AI 回复。
 ///
-/// 每条 user 指令向后找第一条 assistant 回复，取其文本末尾结论段
-/// （[`clip_tail`] 裁剪到 `REPLY_MAX_CHARS`）写入 `Message.reply`；
-/// 中途遇到下一条 user 说明本条无回复，跳过。
+/// 收集 user[i] 之后、下一条 user 之前的**所有** assistant 文本拼起来，
+/// 用 [`clip_tail`] 裁剪到 `REPLY_MAX_CHARS` 写入 `Message.reply`。
+///
+/// 为什么不取第一条 assistant：Claude Code 一个 user→assistant turn 因为多次
+/// 工具调用（assistant→tool_use→tool_result→assistant→...）会拆成多条 assistant
+/// JSONL 行。第一条往往只是「Let me check…」「我来分析一下」之类的开场白，真正
+/// 的结论在后面。取末尾 N 字符既能拿到结论，也能在结论很短时回填前文上下文。
 ///
 /// **必须**对单个 session 内的消息调用 —— 跨 session 混合会配错。
 pub(crate) fn pair_replies(messages: &mut [Message]) {
@@ -499,17 +564,26 @@ pub(crate) fn pair_replies(messages: &mut [Message]) {
         if messages[i].role != Role::User {
             continue;
         }
+        // 收集 [i+1..] 段里直到下一条 user 之前的所有 assistant 文本
+        let mut parts: Vec<&str> = Vec::new();
         for j in (i + 1)..len {
             match messages[j].role {
                 Role::Assistant => {
-                    let reply = clip_tail(messages[j].text.trim(), REPLY_MAX_CHARS);
-                    if !reply.is_empty() {
-                        messages[i].reply = Some(reply);
+                    let t = messages[j].text.trim();
+                    if !t.is_empty() {
+                        parts.push(t);
                     }
-                    break;
                 }
-                Role::User => break, // 下一条 user，本条无回复
+                Role::User => break, // 下一轮 user，本轮收集结束
             }
+        }
+        if parts.is_empty() {
+            continue;
+        }
+        let combined = parts.join("\n");
+        let reply = clip_tail(combined.trim(), REPLY_MAX_CHARS);
+        if !reply.is_empty() {
+            messages[i].reply = Some(reply);
         }
     }
 }
@@ -784,6 +858,124 @@ mod tests {
         ];
         pair_replies(&mut msgs);
         assert_eq!(msgs[0].reply, None);
+    }
+
+    #[test]
+    fn pair_replies_joins_multiple_assistants_in_one_turn() {
+        // Claude Code 一个 turn 可拆成多条 assistant message（多次工具调用）。
+        // 修复前只取第一条「Let me check…」开场白；修复后把后续的也拼进来。
+        let mut msgs = vec![
+            msg(Role::User, "p", "重构 cron 解析", 0),
+            msg(Role::Assistant, "p", "Let me check.", 0),
+            msg(Role::Assistant, "p", "已完成 cron 重构，新增单测", 0),
+            msg(Role::User, "p", "下一条指令", 0),
+        ];
+        pair_replies(&mut msgs);
+        let reply = msgs[0].reply.as_deref().expect("应配上 reply");
+        // 必须包含末尾的真结论
+        assert!(
+            reply.contains("已完成 cron 重构"),
+            "reply 应包含末尾结论，实际：{reply}"
+        );
+    }
+
+    #[test]
+    fn pair_replies_long_combined_drops_opener_keeps_conclusion() {
+        // 多条 assistant 加起来超过 REPLY_MAX_CHARS=200 时，clip_tail 应该把开头
+        // 的「Let me check…」开场白裁掉，只留末尾的真结论。
+        let opener = "Let me check the current implementation.".to_string();
+        let middle = "Analyzing.".repeat(30); // 撑长，让总长超过 200
+        let conclusion = "已完成：补成 7 段，42 个单元测试全绿。";
+        let mut msgs = vec![
+            msg(Role::User, "p", "重构 cron 解析", 0),
+            msg(Role::Assistant, "p", &opener, 0),
+            msg(Role::Assistant, "p", &middle, 0),
+            msg(Role::Assistant, "p", conclusion, 0),
+            msg(Role::User, "p", "下一条", 0),
+        ];
+        pair_replies(&mut msgs);
+        let reply = msgs[0].reply.as_deref().unwrap();
+        assert!(reply.contains("已完成"), "应保留末尾结论：{reply}");
+        assert!(!reply.contains("Let me check"), "开场白应被裁掉：{reply}");
+        assert!(reply.starts_with('…'), "裁剪后应有 … 前缀");
+    }
+
+    #[test]
+    fn pair_replies_long_combined_clipped_to_tail() {
+        // 多条 assistant 加起来超过 REPLY_MAX_CHARS 时取末尾
+        let long_first = "x".repeat(500);
+        let mut msgs = vec![
+            msg(Role::User, "p", "q", 0),
+            msg(Role::Assistant, "p", &long_first, 0),
+            msg(Role::Assistant, "p", "FINAL CONCLUSION HERE.", 0),
+        ];
+        pair_replies(&mut msgs);
+        let reply = msgs[0].reply.as_deref().unwrap();
+        assert!(reply.contains("FINAL CONCLUSION HERE."));
+        assert!(reply.starts_with('…'), "末尾裁剪应带 … 前缀");
+    }
+
+    // -------- dedup_match: 占位符归一化 --------
+
+    #[test]
+    fn dedup_match_catches_pasted_text_placeholder_vs_full() {
+        // 复现 Claude Code 双源问题：history 把粘贴块压成占位符，session 保留全文
+        let history = "这是我新跑的日志：[Pasted text #2 +74 lines]";
+        let session = "这是我新跑的日志：Total jobs run:     20 / 20\n  Completed: 18\n  ...";
+        // 原始 prefix_match 应该不匹配（前 30 字符不同）
+        assert!(!prefix_match(history, session, 30));
+        // dedup_match 应该匹配（归一化后命中）
+        assert!(dedup_match(history, session, 30));
+    }
+
+    #[test]
+    fn dedup_match_catches_image_placeholder() {
+        let a = "看下这个图：[Image #1]";
+        let b = "看下这个图：[Image #2]";
+        assert!(dedup_match(a, b, 30));
+    }
+
+    #[test]
+    fn dedup_match_handles_xml_image_tag() {
+        let a = "参考这个：<image name=[Image #1]></image>";
+        let b = "参考这个：<image name=[Image #2]></image>";
+        assert!(dedup_match(a, b, 30));
+    }
+
+    #[test]
+    fn dedup_match_keeps_distinct_prompts_distinct() {
+        assert!(!dedup_match(
+            "重构 scheduler.rs 的 cron 解析",
+            "修一下 email.rs 的 markdown 渲染",
+            30,
+        ));
+    }
+
+    #[test]
+    fn dedup_match_does_not_match_when_both_normalize_to_empty() {
+        // 全是占位符的两条不该被认作"同一条"（无信息）
+        assert!(!dedup_match("[Pasted text #1]", "[Image #2]", 30));
+    }
+
+    #[test]
+    fn strip_paste_placeholders_handles_common_forms() {
+        assert_eq!(
+            strip_paste_placeholders("这是我新跑的日志：[Pasted text #2 +74 lines]"),
+            "这是我新跑的日志："
+        );
+        assert_eq!(
+            strip_paste_placeholders("看图 [Image #1] 谢谢"),
+            "看图  谢谢"
+        );
+        assert_eq!(
+            strip_paste_placeholders("a <image name=[Image #1]></image> b"),
+            "a  b"
+        );
+        // 不应误伤其它方括号
+        assert_eq!(
+            strip_paste_placeholders("数组 [1, 2, 3] 长度 3"),
+            "数组 [1, 2, 3] 长度 3"
+        );
     }
 
     #[test]
