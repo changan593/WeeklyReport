@@ -276,7 +276,10 @@ pub fn aggregate_with_stats(mut messages: Vec<Message>, parse_stats: ParseStats)
     let mut servers: BTreeSet<String> = BTreeSet::new();
     let mut tools: BTreeSet<String> = BTreeSet::new();
     let mut active_days: BTreeSet<String> = BTreeSet::new();
-    let mut last_text_per_project: HashMap<String, String> = HashMap::new();
+    // 每个项目的"上一条用户 prompt"：(text, ts)。ts 用于近时窗兜底匹配
+    // （history.jsonl 的纯占位符 vs session 同时刻完整内容的去重场景）。
+    let mut last_text_per_project: HashMap<String, (String, Option<DateTime<Local>>)> =
+        HashMap::new();
     let mut total_prompts: u32 = 0;
     // 每个项目的 cwd 投票：project → (path → 出现次数)；同名项目取票数最高的路径
     let mut path_votes: HashMap<String, HashMap<String, u32>> = HashMap::new();
@@ -306,12 +309,33 @@ pub fn aggregate_with_stats(mut messages: Vec<Message>, parse_stats: ParseStats)
                 if is_noise_prompt(&m.text) {
                     continue;
                 }
-                if let Some(prev) = last_text_per_project.get(&m.project) {
-                    if prefix_match(prev, &m.text, 30) {
-                        continue; // 相邻重复，跳过
+                if let Some((prev_text, prev_ts)) = last_text_per_project.get(&m.project) {
+                    let dm = dedup_match_ts(prev_text, *prev_ts, &m.text, m.ts, 30);
+                    if dm {
+                        // 相邻重复，跳过当前条 —— 但要把它的 reply 抢救给前一条。
+                        //
+                        // 背景：Claude Code 同一条用户指令同时存在于 history.jsonl
+                        // （无 assistant 配对）和 projects/<sid>/<id>.jsonl
+                        // （有 assistant 配对）。原逻辑「先入者赢」会让 history 的
+                        // 无回复版本占座，session 的有回复版本被当重复扔掉 —— 表现
+                        // 就是 Claude Code 条目永远没 AI 回复。
+                        //
+                        // 这里在丢弃前用 `bubble up reply` 策略：前一条没 reply、
+                        // 当前条有 reply → 写到前一条上。Codex 单源不受影响。
+                        if m.reply.is_some() {
+                            if let Some(prev_item) = by_project
+                                .get_mut(&m.project)
+                                .and_then(|items| items.last_mut())
+                            {
+                                if prev_item.reply.is_none() {
+                                    prev_item.reply = m.reply.clone();
+                                }
+                            }
+                        }
+                        continue;
                     }
                 }
-                last_text_per_project.insert(m.project.clone(), m.text.clone());
+                last_text_per_project.insert(m.project.clone(), (m.text.clone(), m.ts));
                 let item = LogItem {
                     id: Uuid::new_v4().to_string(),
                     timestamp: m.ts.map(|t| t.to_rfc3339()),
@@ -440,6 +464,156 @@ fn prefix_match(prev: &str, current: &str, n: usize) -> bool {
     p[..min] == c[..min]
 }
 
+/// 去重比对：在 [`prefix_match`] 之上，对带「占位符」的 Claude / Codex 文本
+/// 做归一化，并在前缀对不上时退回比末尾，避免双源同一条指令漏匹配。
+///
+/// 典型场景：Claude Code 的 `~/.claude/history.jsonl` 会把粘贴块压成
+/// `[Pasted text #2 +74 lines]`，session jsonl 把它**完整展开**成几千字。
+/// 两边只在占位符那一段不同，前 30 字符对不上，归一化后 session 那边还是
+/// 几千字粘贴内容（占位符其实没用到），仍然对不上；但用户真正的提问通常
+/// 在粘贴块之后（`...[Pasted text]，把这个换成五分制`），两边的**末尾**
+/// 完全相同。
+///
+/// 三阶段策略：
+/// 1. 原始前 N 字符相同 → 重复
+/// 2. 抹掉占位符后前 N 字符相同 → 重复
+/// 3. 抹掉占位符后末尾 N 字符相同（且含足够实质字符）→ 重复
+fn dedup_match(prev: &str, current: &str, n: usize) -> bool {
+    if prefix_match(prev, current, n) {
+        return true;
+    }
+    let p_norm = strip_paste_placeholders(prev);
+    let c_norm = strip_paste_placeholders(current);
+    // 抹掉占位符后任何一边变空就别再比了，避免无内容的瞎匹配
+    if p_norm.trim().is_empty() || c_norm.trim().is_empty() {
+        return false;
+    }
+    if prefix_match(&p_norm, &c_norm, n) {
+        return true;
+    }
+    suffix_match_meaningful(&p_norm, &c_norm, n)
+}
+
+/// 时间窗兜底的 [`dedup_match`] 版本。当 [`dedup_match`] 失败时，再尝试：
+/// 「`prev` 归一化后是空（纯占位符）+ 两条 ts 都已知且相差 ≤ [`DEDUP_TS_WINDOW_SECS`]」
+/// → 视为重复。
+///
+/// 典型场景：history.jsonl 把一整段长 prompt 压成 `[Pasted text #1 +100 lines]`，
+/// session jsonl 同一秒内记下完整内容。文本完全对不上，但时间几乎贴在一起。
+fn dedup_match_ts(
+    prev: &str,
+    prev_ts: Option<DateTime<Local>>,
+    current: &str,
+    current_ts: Option<DateTime<Local>>,
+    n: usize,
+) -> bool {
+    const DEDUP_TS_WINDOW_SECS: i64 = 10;
+    if dedup_match(prev, current, n) {
+        return true;
+    }
+    let (pts, cts) = match (prev_ts, current_ts) {
+        (Some(p), Some(c)) => (p, c),
+        _ => return false,
+    };
+    if (cts - pts).num_seconds().abs() > DEDUP_TS_WINDOW_SECS {
+        return false;
+    }
+    // 只在 prev 几乎全是占位符（归一化后空）时启用 ts 兜底
+    let p_norm = strip_paste_placeholders(prev);
+    if !p_norm.trim().is_empty() {
+        return false;
+    }
+    // current 必须有实质内容，避免两条都是空占位符相互瞎匹配
+    let c_norm = strip_paste_placeholders(current);
+    !c_norm.trim().is_empty()
+}
+
+/// 在两段归一化文本里找最长公共后缀（按 char 比较）。
+///
+/// 兜底用：粘贴块在文本中间时，前缀已经被几千字粘贴内容占满，比不到真实
+/// 提问，但用户的真实问题通常写在粘贴块**之后**，两边的末尾是同一段。这里
+/// 计算共同后缀的 char 数，要求：
+/// - 至少 [`MIN_MEANINGFUL_CHARS`] 个"实质字符"（字母/汉字/数字）
+/// - **长度差距足够大**（一边至少是另一边的 [`MIN_LENGTH_RATIO`] 倍），
+///   避免近似同长度的两条「只是开头一个字不同、剩下都一样」被瞎合并
+fn suffix_match_meaningful(prev: &str, current: &str, n: usize) -> bool {
+    const MIN_MEANINGFUL_CHARS: usize = 6;
+    // 长方至少是短方的 1.3 倍才允许走 suffix 兜底。
+    // 双源场景下短方（history 压缩版）和长方（session 展开版）几乎必然长度差距明显
+    // （展开几十字粘贴块后差距至少 1.3 倍），而长度近似的两条短指令通常是两条不同
+    // prompt，不该被瞎合并。用整数比例避免引入 float。
+    const MIN_LENGTH_RATIO_NUM: usize = 13;
+    const MIN_LENGTH_RATIO_DEN: usize = 10;
+    let p: Vec<char> = prev.chars().collect();
+    let c: Vec<char> = current.chars().collect();
+    if p.is_empty() || c.is_empty() {
+        return false;
+    }
+    let (short, long) = if p.len() < c.len() {
+        (p.len(), c.len())
+    } else {
+        (c.len(), p.len())
+    };
+    if long * MIN_LENGTH_RATIO_DEN < short * MIN_LENGTH_RATIO_NUM {
+        return false;
+    }
+    let cap = n.min(p.len()).min(c.len());
+    if cap == 0 {
+        return false;
+    }
+    let mut common = 0usize;
+    while common < cap && p[p.len() - 1 - common] == c[c.len() - 1 - common] {
+        common += 1;
+    }
+    if common == 0 {
+        return false;
+    }
+    let tail: &[char] = &p[p.len() - common..];
+    let meaningful = tail.iter().filter(|ch| ch.is_alphanumeric()).count();
+    meaningful >= MIN_MEANINGFUL_CHARS
+}
+
+/// 抹掉 Claude Code / Codex 把附件压缩成的占位符（pasted text / image 引用），
+/// 只用于去重比较；不改变 LogItem.text 实际存储。
+///
+/// 处理对象：
+/// - `[Pasted text #2 +74 lines]` / `[Pasted text #1]`
+/// - `[Image #1]`
+/// - `<image name=[Image #1]></image>`
+fn strip_paste_placeholders(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let rest = &s[i..];
+        // 命中 `[Pasted text` 或 `[Image` 起始 → 跳到下一个 `]`
+        let is_paste = rest.starts_with("[Pasted text");
+        let is_image = rest.starts_with("[Image");
+        if is_paste || is_image {
+            if let Some(end_rel) = rest.find(']') {
+                i += end_rel + 1;
+                continue;
+            }
+        }
+        // 命中 `<image ...>` 标签 → 跳到 `</image>` 之后；缺少闭合就跳到 `>`
+        if rest.starts_with("<image") {
+            if let Some(end_rel) = rest.find("</image>") {
+                i += end_rel + "</image>".len();
+                continue;
+            }
+            if let Some(end_rel) = rest.find('>') {
+                i += end_rel + 1;
+                continue;
+            }
+        }
+        // 普通字符按 char 推进，避免切到 UTF-8 字节中间
+        let ch = s[i..].chars().next().unwrap();
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
 /// 判断一条用户 prompt 是否为工具自动注入的噪音（非用户真实工作内容）。
 ///
 /// 已知噪音类型（均来自 Codex CLI）：
@@ -468,9 +642,13 @@ pub(crate) fn clip_tail(text: &str, max: usize) -> String {
 
 /// 在单个 session 的有序 Message 序列内，把每条 user 指令配上它引发的 AI 回复。
 ///
-/// 每条 user 指令向后找第一条 assistant 回复，取其文本末尾结论段
-/// （[`clip_tail`] 裁剪到 `REPLY_MAX_CHARS`）写入 `Message.reply`；
-/// 中途遇到下一条 user 说明本条无回复，跳过。
+/// 收集 user[i] 之后、下一条 user 之前的**所有** assistant 文本拼起来，
+/// 用 [`clip_tail`] 裁剪到 `REPLY_MAX_CHARS` 写入 `Message.reply`。
+///
+/// 为什么不取第一条 assistant：Claude Code 一个 user→assistant turn 因为多次
+/// 工具调用（assistant→tool_use→tool_result→assistant→...）会拆成多条 assistant
+/// JSONL 行。第一条往往只是「Let me check…」「我来分析一下」之类的开场白，真正
+/// 的结论在后面。取末尾 N 字符既能拿到结论，也能在结论很短时回填前文上下文。
 ///
 /// **必须**对单个 session 内的消息调用 —— 跨 session 混合会配错。
 pub(crate) fn pair_replies(messages: &mut [Message]) {
@@ -479,17 +657,26 @@ pub(crate) fn pair_replies(messages: &mut [Message]) {
         if messages[i].role != Role::User {
             continue;
         }
+        // 收集 [i+1..] 段里直到下一条 user 之前的所有 assistant 文本
+        let mut parts: Vec<&str> = Vec::new();
         for j in (i + 1)..len {
             match messages[j].role {
                 Role::Assistant => {
-                    let reply = clip_tail(messages[j].text.trim(), REPLY_MAX_CHARS);
-                    if !reply.is_empty() {
-                        messages[i].reply = Some(reply);
+                    let t = messages[j].text.trim();
+                    if !t.is_empty() {
+                        parts.push(t);
                     }
-                    break;
                 }
-                Role::User => break, // 下一条 user，本条无回复
+                Role::User => break, // 下一轮 user，本轮收集结束
             }
+        }
+        if parts.is_empty() {
+            continue;
+        }
+        let combined = parts.join("\n");
+        let reply = clip_tail(combined.trim(), REPLY_MAX_CHARS);
+        if !reply.is_empty() {
+            messages[i].reply = Some(reply);
         }
     }
 }
@@ -569,6 +756,40 @@ mod tests {
         ];
         let s = aggregate(msgs);
         assert_eq!(s.by_project["a"].len(), 2, "相邻重复应去重");
+    }
+
+    #[test]
+    fn aggregate_dedup_bubbles_reply_from_session_into_history_entry() {
+        // 模拟 Claude Code 双源：history.jsonl 的同一条指令（无 reply）
+        // 排在前面、session jsonl 的同一条指令（有 reply）排在后面。
+        // 期望：保留前者（time 早），但 reply 被后者补上。
+        let mut hist = msg(Role::User, "weekly-report", "把卡片状态改为绿色", 1);
+        hist.reply = None;
+        let mut sess = msg(Role::User, "weekly-report", "把卡片状态改为绿色", 1);
+        sess.reply = Some("已把 enabled=true 的卡片背景改成 emerald-50".into());
+
+        let s = aggregate(vec![hist, sess]);
+        let items = &s.by_project["weekly-report"];
+        assert_eq!(items.len(), 1, "重复应去重");
+        assert_eq!(
+            items[0].reply.as_deref(),
+            Some("已把 enabled=true 的卡片背景改成 emerald-50"),
+            "session 的 reply 应该被抢救回来"
+        );
+    }
+
+    #[test]
+    fn aggregate_dedup_does_not_clobber_existing_reply() {
+        // 第一条已经有 reply 时不应被第二条覆盖（避免拿质量更差的回复）
+        let mut a = msg(Role::User, "x", "跑一下 cargo test", 1);
+        a.reply = Some("good reply".into());
+        let mut b = msg(Role::User, "x", "跑一下 cargo test", 1);
+        b.reply = Some("worse reply".into());
+
+        let s = aggregate(vec![a, b]);
+        let items = &s.by_project["x"];
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].reply.as_deref(), Some("good reply"));
     }
 
     #[test]
@@ -730,6 +951,221 @@ mod tests {
         ];
         pair_replies(&mut msgs);
         assert_eq!(msgs[0].reply, None);
+    }
+
+    #[test]
+    fn pair_replies_joins_multiple_assistants_in_one_turn() {
+        // Claude Code 一个 turn 可拆成多条 assistant message（多次工具调用）。
+        // 修复前只取第一条「Let me check…」开场白；修复后把后续的也拼进来。
+        let mut msgs = vec![
+            msg(Role::User, "p", "重构 cron 解析", 0),
+            msg(Role::Assistant, "p", "Let me check.", 0),
+            msg(Role::Assistant, "p", "已完成 cron 重构，新增单测", 0),
+            msg(Role::User, "p", "下一条指令", 0),
+        ];
+        pair_replies(&mut msgs);
+        let reply = msgs[0].reply.as_deref().expect("应配上 reply");
+        // 必须包含末尾的真结论
+        assert!(
+            reply.contains("已完成 cron 重构"),
+            "reply 应包含末尾结论，实际：{reply}"
+        );
+    }
+
+    #[test]
+    fn pair_replies_long_combined_drops_opener_keeps_conclusion() {
+        // 多条 assistant 加起来超过 REPLY_MAX_CHARS=200 时，clip_tail 应该把开头
+        // 的「Let me check…」开场白裁掉，只留末尾的真结论。
+        let opener = "Let me check the current implementation.".to_string();
+        let middle = "Analyzing.".repeat(30); // 撑长，让总长超过 200
+        let conclusion = "已完成：补成 7 段，42 个单元测试全绿。";
+        let mut msgs = vec![
+            msg(Role::User, "p", "重构 cron 解析", 0),
+            msg(Role::Assistant, "p", &opener, 0),
+            msg(Role::Assistant, "p", &middle, 0),
+            msg(Role::Assistant, "p", conclusion, 0),
+            msg(Role::User, "p", "下一条", 0),
+        ];
+        pair_replies(&mut msgs);
+        let reply = msgs[0].reply.as_deref().unwrap();
+        assert!(reply.contains("已完成"), "应保留末尾结论：{reply}");
+        assert!(!reply.contains("Let me check"), "开场白应被裁掉：{reply}");
+        assert!(reply.starts_with('…'), "裁剪后应有 … 前缀");
+    }
+
+    #[test]
+    fn pair_replies_long_combined_clipped_to_tail() {
+        // 多条 assistant 加起来超过 REPLY_MAX_CHARS 时取末尾
+        let long_first = "x".repeat(500);
+        let mut msgs = vec![
+            msg(Role::User, "p", "q", 0),
+            msg(Role::Assistant, "p", &long_first, 0),
+            msg(Role::Assistant, "p", "FINAL CONCLUSION HERE.", 0),
+        ];
+        pair_replies(&mut msgs);
+        let reply = msgs[0].reply.as_deref().unwrap();
+        assert!(reply.contains("FINAL CONCLUSION HERE."));
+        assert!(reply.starts_with('…'), "末尾裁剪应带 … 前缀");
+    }
+
+    // -------- dedup_match: 占位符归一化 --------
+
+    #[test]
+    fn dedup_match_catches_pasted_text_placeholder_vs_full() {
+        // 复现 Claude Code 双源问题：history 把粘贴块压成占位符，session 保留全文
+        let history = "这是我新跑的日志：[Pasted text #2 +74 lines]";
+        let session = "这是我新跑的日志：Total jobs run:     20 / 20\n  Completed: 18\n  ...";
+        // 原始 prefix_match 应该不匹配（前 30 字符不同）
+        assert!(!prefix_match(history, session, 30));
+        // dedup_match 应该匹配（归一化后命中）
+        assert!(dedup_match(history, session, 30));
+    }
+
+    #[test]
+    fn dedup_match_catches_image_placeholder() {
+        let a = "看下这个图：[Image #1]";
+        let b = "看下这个图：[Image #2]";
+        assert!(dedup_match(a, b, 30));
+    }
+
+    #[test]
+    fn dedup_match_handles_xml_image_tag() {
+        let a = "参考这个：<image name=[Image #1]></image>";
+        let b = "参考这个：<image name=[Image #2]></image>";
+        assert!(dedup_match(a, b, 30));
+    }
+
+    #[test]
+    fn dedup_match_keeps_distinct_prompts_distinct() {
+        assert!(!dedup_match(
+            "重构 scheduler.rs 的 cron 解析",
+            "修一下 email.rs 的 markdown 渲染",
+            30,
+        ));
+    }
+
+    #[test]
+    fn dedup_match_does_not_match_when_both_normalize_to_empty() {
+        // 全是占位符的两条不该被认作"同一条"（无信息）
+        assert!(!dedup_match("[Pasted text #1]", "[Image #2]", 30));
+    }
+
+    // -------- dedup_match：归一化后比末尾（suffix）兜底 --------
+
+    #[test]
+    fn dedup_match_falls_back_to_suffix_when_paste_in_middle() {
+        // 真实数据：history 把粘贴块整段压成占位符，但用户的真实问题写在粘贴块**之后**；
+        // session 那边把粘贴块**完整展开**，前缀几千字 SQL/python/表格，归一化前缀也对不上，
+        // 只有"两边末尾的真实提问段相同"。
+        let history = "[Pasted text #1 +27 lines]跑完了，你看一下";
+        let session_long: String = format!(
+            "{}\n{}",
+            "==============================================".repeat(10), // 模拟粘贴块前缀
+            "===跑完了，你看一下"
+        );
+        assert!(!prefix_match(history, &session_long, 30));
+        assert!(
+            dedup_match(history, &session_long, 30),
+            "归一化后两边末尾 跑完了，你看一下 应该命中 suffix 兜底"
+        );
+    }
+
+    #[test]
+    fn dedup_match_falls_back_to_suffix_with_paste_in_middle_of_both() {
+        // 粘贴块在中间，前缀都一样几个字（如 `然后可以再加一个gpt-5.4-mini，`），
+        // 之后的内容（占位符 vs 代码块）不一致；末尾用户的真实指令两边相同。
+        let history = "然后可以再加一个gpt-5.4-mini，[Pasted text #1 +18 lines]，然后我们所有评测都是这三个模型同时评测然后取平均。";
+        let session = "然后可以再加一个gpt-5.4-mini，from openai import OpenAI\nimport os\nclient = OpenAI(api_key=...)\nresp = client.chat.completions.create(model='gpt-5.4-mini', messages=[{'role':'user','content':'hi'}])\nprint(resp)\n，然后我们所有评测都是这三个模型同时评测然后取平均。";
+        assert!(
+            dedup_match(history, session, 30),
+            "前缀对不上 30 char，但末尾真实指令段一致，suffix 兜底应命中"
+        );
+    }
+
+    #[test]
+    fn dedup_match_suffix_requires_meaningful_chars() {
+        // 仅末尾几个标点/单字相同（"？"、"好的。"）不应认作重复
+        assert!(!dedup_match("你好吗？", "今天天气怎么样？", 30));
+        assert!(!dedup_match("可以。", "好的。", 30));
+    }
+
+    // -------- dedup_match_ts：纯占位符 history + 同时刻 session 全文的 ts 兜底 --------
+
+    #[test]
+    fn dedup_match_ts_matches_pure_placeholder_within_window() {
+        // history.jsonl 把整个长 prompt 压成 `[Pasted text #1 +100 lines]`，归一化后为空；
+        // session jsonl 同一秒内记下完整内容。文本完全没法匹配，但 ts 几乎贴在一起。
+        let ts1 = Local::now();
+        let ts2 = ts1 + Duration::milliseconds(3);
+        assert!(dedup_match_ts(
+            "[Pasted text #1 +100 lines]",
+            Some(ts1),
+            "任务：验证并完成 WeeklyReport 项目里 Claude Code 日志 reply 缺失/质量低的修复\n背景：...",
+            Some(ts2),
+            30,
+        ));
+    }
+
+    #[test]
+    fn dedup_match_ts_does_not_match_when_window_too_wide() {
+        // 同样的纯占位符 + 实文本，但 ts 差 1 分钟 → 不算同一条
+        let ts1 = Local::now();
+        let ts2 = ts1 + Duration::minutes(1);
+        assert!(!dedup_match_ts(
+            "[Pasted text #1 +100 lines]",
+            Some(ts1),
+            "完全不同的真实内容...",
+            Some(ts2),
+            30,
+        ));
+    }
+
+    #[test]
+    fn dedup_match_ts_does_not_match_when_prev_has_real_text() {
+        // ts 兜底只在 prev 归一化为空时启用。prev 含真实文字 + 占位符时不走 ts 兜底，
+        // 避免「同时刻两条不同指令」被瞎合并。
+        let ts1 = Local::now();
+        let ts2 = ts1 + Duration::milliseconds(50);
+        assert!(!dedup_match_ts(
+            "看下这个：[Pasted text #1]", // 归一化后还剩"看下这个："
+            Some(ts1),
+            "另一个完全不同的指令",
+            Some(ts2),
+            30,
+        ));
+    }
+
+    #[test]
+    fn dedup_match_ts_no_ts_means_no_fallback() {
+        // 缺 ts 时不应走兜底
+        assert!(!dedup_match_ts(
+            "[Pasted text #1 +100 lines]",
+            None,
+            "完整内容",
+            None,
+            30,
+        ));
+    }
+
+    #[test]
+    fn strip_paste_placeholders_handles_common_forms() {
+        assert_eq!(
+            strip_paste_placeholders("这是我新跑的日志：[Pasted text #2 +74 lines]"),
+            "这是我新跑的日志："
+        );
+        assert_eq!(
+            strip_paste_placeholders("看图 [Image #1] 谢谢"),
+            "看图  谢谢"
+        );
+        assert_eq!(
+            strip_paste_placeholders("a <image name=[Image #1]></image> b"),
+            "a  b"
+        );
+        // 不应误伤其它方括号
+        assert_eq!(
+            strip_paste_placeholders("数组 [1, 2, 3] 长度 3"),
+            "数组 [1, 2, 3] 长度 3"
+        );
     }
 
     #[test]
