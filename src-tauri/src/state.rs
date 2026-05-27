@@ -44,13 +44,46 @@ pub use workspaces::{delete_workspace, ensure_default_workspace, list_workspaces
 // Settings（通用设置，单例）—— 简单到不值得单独拆文件
 // ============================================================
 
-/// 应用通用设置。当前主要包含 token 压缩参数。
+/// 周报生成模式（单轮 vs 两轮 LLM）。
+///
+/// - `OneRound`：经典模式 —— 一次 LLM 调用，直接从 work_logs 生成 Markdown。
+/// - `TwoRoundSilent`：两轮模式 —— 第一轮从 work_logs 提取「完成事项」JSON 数组
+///   （项目/标题/细节/证据/日期），第二轮用提取出的事项 + 用户模板格式生成 Markdown。
+///   质量更高，特别擅长去除"过程性指令"的噪音；代价是 token 用量翻倍、延迟更长。
+///   第一轮 JSON 解析失败时自动 fallback 到 `OneRound`。UI 不需新增步骤（静默模式）。
+///
+/// 未来扩展：`TwoRoundWithEdit` 会在两轮之间插入用户编辑步骤（需前端 UI 支持）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum GenerationMode {
+    #[default]
+    OneRound,
+    TwoRoundSilent,
+}
+
+/// 应用通用设置。当前主要包含 token 压缩参数和 prompt 行为开关。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Settings {
     /// AI 回复首尾保留字符数（详见 SPEC#3 核心算法）。默认 200。
     pub prompt_clip_chars: u32,
-    /// 生成时注入到 prompt 的历史报告数量。默认 2。
+    /// 生成时注入到 prompt 的历史报告数量上限。仅在 [`Self::inject_past_reports`]
+    /// 为 true 时生效；为 false 时此字段被忽略。默认 2。
     pub past_reports_context: u32,
+    /// 是否把历史报告注入 prompt 作为风格参考。默认 `false`。
+    ///
+    /// 背景：早期版本默认注入最近 N 份历史报告，但发现历史报告会反向「污染」
+    /// LLM 的格式判断 —— 即便用户切换到了另一个模板，LLM 也会照搬历史报告
+    /// 的章节结构，导致用户的 `Template.extra_prompt` 形同虚设。
+    /// v0.1.2 起改为默认关闭；启用后仍可通过 [`Self::past_reports_same_template_only`]
+    /// 限定只取同模板生成的历史报告，进一步降低污染。
+    #[serde(default)]
+    pub inject_past_reports: bool,
+    /// 注入历史报告时是否仅取**同模板 ID** 生成的报告。默认 `true`。
+    /// 仅在 [`Self::inject_past_reports`] 为 true 时生效。
+    #[serde(default = "default_true")]
+    pub past_reports_same_template_only: bool,
+    /// 周报生成模式。详见 [`GenerationMode`]。默认 `OneRound`（省成本）。
+    #[serde(default)]
+    pub generation_mode: GenerationMode,
     /// 应用界面语言（IETF BCP 47 简化）。当前支持 `"zh-CN"` / `"en"`。默认 `"zh-CN"`。
     /// 前端 i18n 资源在 `src/i18n/locales/`；本字段同步到 LocalStorage 给前端首屏使用。
     #[serde(default = "default_language")]
@@ -61,11 +94,18 @@ fn default_language() -> String {
     "zh-CN".to_string()
 }
 
+fn default_true() -> bool {
+    true
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
             prompt_clip_chars: 200,
             past_reports_context: 2,
+            inject_past_reports: false,
+            past_reports_same_template_only: true,
+            generation_mode: GenerationMode::default(),
             language: default_language(),
         }
     }
@@ -130,11 +170,55 @@ mod tests {
         let s = Settings {
             prompt_clip_chars: 300,
             past_reports_context: 4,
+            inject_past_reports: true,
+            past_reports_same_template_only: false,
+            generation_mode: GenerationMode::TwoRoundSilent,
             language: "zh-CN".to_string(),
         };
         save_settings(&s).unwrap();
         let loaded = get_settings().unwrap();
         assert_eq!(loaded, s);
+    }
+
+    #[test]
+    fn settings_defaults_are_safe() {
+        let s = Settings::default();
+        assert!(
+            !s.inject_past_reports,
+            "默认不注入历史报告，避免污染 LLM 格式判断"
+        );
+        assert!(
+            s.past_reports_same_template_only,
+            "若用户开启注入，默认仍限定同模板"
+        );
+        assert_eq!(
+            s.generation_mode,
+            GenerationMode::OneRound,
+            "默认单轮模式，避免成本翻倍"
+        );
+    }
+
+    #[test]
+    fn settings_backward_compat_without_new_fields() {
+        // 旧版本 settings.json 没有 inject_past_reports / past_reports_same_template_only
+        // / generation_mode 字段，反序列化应回到默认，不该崩
+        let json = r#"{
+            "prompt_clip_chars": 200,
+            "past_reports_context": 2,
+            "language": "zh-CN"
+        }"#;
+        let s: Settings = serde_json::from_str(json).unwrap();
+        assert!(!s.inject_past_reports);
+        assert!(s.past_reports_same_template_only);
+        assert_eq!(s.generation_mode, GenerationMode::OneRound);
+    }
+
+    #[test]
+    fn generation_mode_serializes_as_string() {
+        let s = serde_json::to_string(&GenerationMode::OneRound).unwrap();
+        assert_eq!(s, "\"OneRound\"");
+        let s = serde_json::to_string(&GenerationMode::TwoRoundSilent).unwrap();
+        assert_eq!(s, "\"TwoRoundSilent\"");
     }
 
     #[test]
