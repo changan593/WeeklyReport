@@ -5,10 +5,107 @@
 
 ---
 
+## [0.1.2] - 2026-05-27
+
+周报生成质量大改 —— 解决用户配置自定义模板（带 `extra_prompt` 示例）后，
+LLM 仍照搬技术周报章节结构的核心痛点。同期合入一轮 UI/UX 打磨与等待动效。
+
+### Added — 周报生成质量
+
+- **文档扫描扩展（`projectdocs.rs` 重写）**：
+  - 扫描范围从「项目根目录 `*.md`」扩到「项目根 + `doc/docs/{*,*/*}.md`」
+  - 子目录名大小写不敏感（`doc/Doc/DOC/docs/Docs/DOCS`），最大深度 2 层
+  - 每个 md 文件记录 mtime
+  - **强/弱信号分类**：`README*` / `CLAUDE*` / `CHANGELOG*` / `ROADMAP*` 永远是强信号；
+    其它 md 按 mtime ≥ since 判断（本期内修改 → 强，否则 → 弱）
+  - 弱信号仅给「文件名 + 首行标题 + mtime」，告知 LLM 不要据此推断本期成果
+- **两轮 LLM 模式**（可选，`generation_mode = "TwoRoundSilent"`）：
+  - 第一轮 `extract_achievements`：LLM 从 work_logs 提炼 JSON 数组
+    `[{project, title, detail, evidence, date_range}]`
+  - 第二轮 `build_prompt_from_achievements`：用提炼的事项渲染 Markdown
+  - 第一轮 JSON 解析失败时自动 fallback 到单轮（不阻塞）
+  - 默认关闭，避免 token 翻倍；通过 `settings.json` 启用
+- **等待动效**（`GenerateDialog`）：
+  - `BouncingDots` 三个跳动点附在「正在收集…」标题尾
+  - `IndeterminateBar` 不定式进度条循环左滑（`progress-sweep` keyframes）
+  - `CyclingLog` 每 1.8s 切一条 log 文案，淡入下沉（`log-fade-in` keyframes）
+  - 11 条文案对应真实内部阶段（扫描 / 解析 / 去重 / 过滤填充词 / 配对回复 / 强弱分类 …）
+
+### Added — 一轮 UI/UX 打磨（原 Unreleased 内容并入本版）
+
+- **HTML 报告美化（`email.rs`）**：
+  - 新增 `ReportMeta` 数据结构 + `render_html_with_meta(md, meta)` 渲染函数
+  - 顶部统计卡片：项目数 / Tokens / LLM 源 / 生成时间，4 个 stat tile
+  - 按项目工作量条形图（Top 8，CSS-only，无 JS，邮件客户端兼容）
+  - 视觉重做：H1 黑色下划线 / H2 翠绿色左色条 / 改良 code blockquote 样式
+  - `tokens_used` 大数字自动 `1.2k / 3.4M` 压缩显示
+- **会话级状态徽标**：
+  - 工作区卡片：本地→"本地就绪"（emerald）/ SSH→"未测试 → 测试中 → 连接正常 / 失败"
+    四态切换；卡片右上加内联"测试"按钮（spinning refresh icon）
+  - LLM 源卡片：自动检测配置完整度（`api_key` / `model` / `base_url`），
+    显示"缺少 API key"等具体短语；测试成功/失败状态覆盖；卡片右上加内联"测试"按钮
+- **次级页面打磨**：
+  - 报告列表标题加总数计数；空态加 "生成第一份周报" CTA 按钮
+  - 定时任务：SMTP 未配置横幅加 "去设置" 跳转按钮；卡片状态由文本改为
+    StatusPill（已停用 / 已调度 / 上次成功 / 上次失败）
+  - 模板：卡片自动统计 "已被 N 个定时任务引用"，删除前一目了然
+
+### Changed — Prompt 重构（核心修复）
+
+- **`Template.extra_prompt` 主导格式**：
+  - 上提到 prompt 顶部 `<format_spec must_follow="true">` 包裹
+  - 明示「严格按此输出，不要套用任何其它结构」
+- **删除旧的 7 条通用规则 + 禁止用语清单**：
+  - anti-pattern list（「不许写做了一些工作」等）反而引导 LLM 写出禁词
+  - 保留 3 条不可妥协的硬约束：禁前言 / 禁编造数字 / 禁「（推断）」标签
+- **`style=custom` 或 `extra_prompt` 非空时不注入内置风格指引**，让用户模板说了算
+- **章节约束加严**：「不允许新增/合并/重命名/调整顺序」按编号列出
+- **历史报告改用 `<format_reference_only no_copy_structure="true">` 包裹**，
+  并明示「不要照抄章节结构或格式」
+
+### Changed — 信号清洗（输入侧）
+
+- **`is_noise_prompt` 扩展**：除了 Codex 自动注入的 `<environment_context>` 等，
+  还过滤纯填充词指令：
+  - 试错：「再试一次」「重试」「再来」
+  - 表态：「好的」「嗯」「OK」「明白」「没问题」
+  - 短问询：「为什么」「怎么了」
+  - 判别：去标点后 ≤ 6 字 + 完全等于白名单
+- **`pair_replies` 加 `is_weak_reply` 过滤**：「好的」「已收到」类弱表态不再写入 reply
+
+### Changed — 历史报告注入策略
+
+- **默认不注入**（`inject_past_reports` 默认 `false`），避免历史报告反向污染当前模板格式
+- 启用时**默认仅取同模板 ID** 生成的历史报告（`past_reports_same_template_only` 默认 `true`）
+- 旧 `past_reports_context` 字段保留语义为「启用时的注入上限」
+
+### Added — 新 Settings 字段（全部 `#[serde(default)]` 向后兼容）
+
+- `inject_past_reports: bool`（默认 `false`）
+- `past_reports_same_template_only: bool`（默认 `true`）
+- `generation_mode: "OneRound" | "TwoRoundSilent"`（默认 `OneRound`）
+
+### Fixed
+
+- **pre-existing flaky 测试**：`email::tests::send_rejects_empty_to` 在并发 cargo test 时
+  被 i18n 模块测试切语言污染（依赖全局 `LANG=zh-CN`），改成显式锁定 + 允许英文回退
+- 既有单元测试两处编译错误（`LogItem` 缺 `reply/server`、`Settings` 缺 `language`），
+  原来阻止 `cargo test` 直接通过；现在 317 个测试全绿
+- 两处 clippy 1.95 新增警告（`email.rs::sort_by`、`logs.rs::needless_range_loop`）
+
+### 设计取舍
+
+- 渲染器仍按 ADR-007 保持自写极简版
+- 状态徽标走会话级 React state，**不持久化**——避免给"曾测过"造成假信号
+- 两轮模式默认关闭，避免对所有用户造成 token 翻倍；想要更高质量的用户编辑 `settings.json` 启用
+- `projectdocs::DocFile` 强/弱信息走文本标记而非 struct 字段，保持 `Summary.project_docs` 字段
+  类型不变，前端 UI（可编辑 textarea）无需改动
+
+---
+
 ## [Unreleased]
 
-一次 UI/UX 打磨：工作区与 LLM 源主页加状态徽标；报告 HTML（详情页 / 定时邮件）重做，
-带统计卡片与按项目条形图；其余页面做轻量产品向优化。
+（暂无）
 
 ### Added
 - **README 发版速览表**：英文与中文 README 都新增 "Releases / 发版速览" 板块，

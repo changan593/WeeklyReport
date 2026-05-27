@@ -42,7 +42,7 @@ One line per release — full notes in [docs/CHANGELOG.md](./docs/CHANGELOG.md).
 
 | Version | Date | Highlight |
 | --- | --- | --- |
-| **Unreleased** | — | Status badges on Workspaces & LLM Sources, beautified report HTML with stats card and per-project chart, and light PM-polish across pages. |
+| **0.1.2** | 2026-05-27 | Major report-quality overhaul: `doc/docs` subdir scan with mtime-based strong/weak signal classification; prompt rewrite so user `extra_prompt` truly drives the format (no more tech-report template overriding custom templates); filler-word filtering (`好的` / `再试一次`); optional two-round LLM mode (extract → render); animated progress bar + bouncing dots + cycling logs during waiting. |
 | **0.1.1** | 2026-05-21 | Three Windows-only fixes (console-window, modal drag-close, SSH key hint) and a complete SSH setup guide. |
 | **0.1.0** | 2026-05-20 | First public release — end-to-end pipeline: log collection → compression → LLM generation → local archive → scheduled email. |
 
@@ -62,7 +62,9 @@ The Swift port is in active iteration; some features (SSH sync, scheduling, SMTP
 - 🪶 **Lightweight** — no database, JSON file storage, < 10 MB release binary
 - 🌐 **Multi-LLM** — OpenAI / Anthropic / Gemini / DeepSeek / OpenRouter / Kimi / Qwen / local Ollama / vLLM with 10 built-in presets
 - 🖥️ **Multi-workspace** — local + N SSH remote servers, logs aggregated into one report
-- 🧠 **Style memory** — past weekly reports are passed as style reference for consistency
+- 📚 **Project doc awareness** — auto-scans project root + `doc/docs/` subdirs (≤ 2 levels deep) as background; classifies docs into strong/weak signals by modification time
+- 🎯 **Format fidelity** — your template's `extra_prompt` (with concrete examples) drives the output verbatim; no built-in rules override custom templates
+- 🔁 **Two-round mode** (optional) — first extract achievement JSON, then render; cuts noise from process-y prompts at the cost of 2× tokens
 - ⏰ **Scheduled email** — cron expression + SMTP, weekly generation and delivery
 - 🔒 **Data sovereignty** — everything stays local; back up, Git-sync, migrate freely
 - 🌍 **Cross-platform** — macOS / Linux / Windows via Tauri 2
