@@ -1,6 +1,6 @@
 [package]
 name = "weekly-report"
-version = "0.1.1"
+version = "0.1.2"
 description = "AI-powered weekly report generator from Claude Code / Codex CLI logs."
 authors = ["WeeklyReport contributors"]
 license = "MIT"

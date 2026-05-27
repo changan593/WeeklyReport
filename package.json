@@ -1,7 +1,7 @@
 {
   "name": "weekly-report",
   "private": true,
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "AI-powered weekly report generator from Claude Code / Codex CLI logs.",
   "type": "module",
   "scripts": {
