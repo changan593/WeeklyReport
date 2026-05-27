@@ -572,14 +572,89 @@ function ConfigStep({
 
 function CollectingStep() {
   const { t } = useTranslation();
+  // 循环 log 文案：让用户看到「应用确实在干活」，每条对应一个真实的内部阶段
+  const phrases = useMemo(
+    () => [
+      '扫描 ~/.claude/projects/ 与 ~/.codex/sessions/',
+      '解析 Claude Code 与 Codex JSONL',
+      '按项目分组 · 时间排序',
+      '识别工具反灌的 tool_result 反向消息',
+      '相邻重复指令去重（前 30 字 / 末尾兜底 / 时间窗）',
+      '过滤填充词指令（"好的" / "再试一次" / "嗯"）',
+      '配对 user prompt 与 AI 回复结论段',
+      '读取项目根目录 README / CLAUDE 文档',
+      '扫描 doc/ · docs/ 子目录的 md 文档',
+      '按 mtime 分类强信号 / 弱信号文档',
+      '聚合统计：活跃天数 · 项目数 · 主项目',
+    ],
+    [],
+  );
   return (
-    <div className="py-12 text-center">
+    <div className="py-10 text-center">
       <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-xl bg-stone-100 text-stone-500">
         <Icon name="sparkle" size={22} />
       </div>
-      <p className="text-[14px] font-medium text-stone-900">{t('generate.collecting.title')}</p>
+      <p className="text-[14px] font-medium text-stone-900">
+        {t('generate.collecting.title')}
+        <BouncingDots />
+      </p>
       <p className="mt-1 text-[12px] text-stone-500">{t('generate.collecting.subtitle')}</p>
+      <IndeterminateBar />
+      <CyclingLog phrases={phrases} />
     </div>
+  );
+}
+
+// ============================================================
+// Loading 子组件：跳动点 / 不定式进度条 / 循环 log 行
+// ============================================================
+
+/// 三个点的跳动动画，附在「正在...」后面让标题有"在动"的感觉
+function BouncingDots() {
+  return (
+    <span className="ml-0.5 inline-flex items-baseline gap-[3px] align-baseline">
+      <span className="h-1 w-1 animate-bounce rounded-full bg-stone-600 [animation-delay:-0.32s]" />
+      <span className="h-1 w-1 animate-bounce rounded-full bg-stone-600 [animation-delay:-0.16s]" />
+      <span className="h-1 w-1 animate-bounce rounded-full bg-stone-600" />
+    </span>
+  );
+}
+
+/// 不定式进度条：一截高亮在轨道里循环左→右滑动。
+/// 不是"知道百分比的"那种进度，是"在动"的视觉信号。
+function IndeterminateBar() {
+  return (
+    <div
+      className="mx-auto mt-4 h-[3px] w-56 overflow-hidden rounded-full bg-stone-100"
+      role="progressbar"
+      aria-busy="true"
+      aria-label="loading"
+    >
+      <div className="h-full w-1/4 animate-progress-sweep rounded-full bg-stone-700" />
+    </div>
+  );
+}
+
+/// 每 `intervalMs` 毫秒切到下一条文案，淡入效果。
+/// 用 key 让 React 把 <p> 当新节点 → 重跑入场动画。
+function CyclingLog({ phrases, intervalMs = 1800 }) {
+  const [idx, setIdx] = useState(0);
+  useEffect(() => {
+    if (phrases.length <= 1) return undefined;
+    const tm = setInterval(() => {
+      setIdx((i) => (i + 1) % phrases.length);
+    }, intervalMs);
+    return () => clearInterval(tm);
+  }, [phrases.length, intervalMs]);
+  if (phrases.length === 0) return null;
+  return (
+    <p
+      key={idx}
+      className="mt-3 animate-log-fade-in truncate px-6 font-mono text-[11.5px] text-stone-400"
+      title={phrases[idx]}
+    >
+      › {phrases[idx]}
+    </p>
   );
 }
 
@@ -963,14 +1038,36 @@ function DraftBanner({ draft, onContinue, onDiscard }) {
 
 function GeneratingStep() {
   const { t } = useTranslation();
+  // 循环 log 文案对应 build_prompt → LLM 调用 → 渲染存档 的各阶段
+  const phrases = useMemo(
+    () => [
+      '组装 prompt：项目背景 + 工作日志',
+      '注入 3 条硬约束（禁前言 · 禁编数字 · 禁推断标签）',
+      '注入用户模板的输出格式说明',
+      '调用 LLM，等待首 token...',
+      '模型正在思考本周 TL;DR ...',
+      '模型正在思考各项目进展 ...',
+      '模型正在归纳技术亮点 ...',
+      '模型正在推断下周计划 ...',
+      '渲染 Markdown 输出',
+      '同步存档历史周报',
+      '生成美化版 HTML 邮件预览',
+    ],
+    [],
+  );
   return (
-    <div className="py-12 text-center">
+    <div className="py-10 text-center">
       <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-xl bg-stone-100 text-stone-500">
         <Icon name="sparkle" size={22} />
       </div>
-      <p className="text-[14px] font-medium text-stone-900">{t('generate.generating.title')}</p>
+      <p className="text-[14px] font-medium text-stone-900">
+        {t('generate.generating.title')}
+        <BouncingDots />
+      </p>
       <p className="mt-1 text-[12px] text-stone-500">{t('generate.generating.subtitle')}</p>
-      <p className="mt-3 text-[11.5px] text-stone-400">{t('generate.generating.hint')}</p>
+      <IndeterminateBar />
+      <CyclingLog phrases={phrases} />
+      <p className="mt-3 text-[11px] text-stone-400">{t('generate.generating.hint')}</p>
     </div>
   );
 }
