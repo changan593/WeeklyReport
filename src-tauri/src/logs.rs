@@ -614,17 +614,167 @@ fn strip_paste_placeholders(s: &str) -> String {
     out
 }
 
-/// 判断一条用户 prompt 是否为工具自动注入的噪音（非用户真实工作内容）。
+/// 判断一条用户 prompt 是否为噪音（非用户真实工作内容）。
 ///
-/// 已知噪音类型（均来自 Codex CLI）：
-/// - 每轮注入的 `<environment_context>` 环境信息块（cwd / shell / 日期 / 时区）
-/// - 中断提示 `<turn_aborted>`
-/// - automation 定时任务的触发文本（`Automation:` 元信息头 + `Automation ID:`）
+/// 涵盖两类：
+///
+/// 1. **工具自动注入**（来自 Codex CLI）：
+///    - `<environment_context>` 环境信息块（cwd / shell / 日期 / 时区）
+///    - 中断提示 `<turn_aborted>`
+///    - automation 定时任务触发文本（`Automation:` + `Automation ID:`）
+///
+/// 2. **用户的过程性填充词**（v0.1.2 新增）：例如「再试一次」「为啥」「好的继续」
+///    「嗯」之类。这些是用户对 AI 回复的反馈/确认而不是新的工作指令，混进 work_logs
+///    会让 LLM 把它们当成「做的事」，污染周报内容。
+///    详见 [`is_filler_prompt`] 的判别规则。
 pub(crate) fn is_noise_prompt(text: &str) -> bool {
     let t = text.trim_start();
-    t.starts_with("<environment_context>")
+    if t.starts_with("<environment_context>")
         || t.starts_with("<turn_aborted>")
         || (t.starts_with("Automation:") && t.contains("Automation ID:"))
+    {
+        return true;
+    }
+    is_filler_prompt(text)
+}
+
+/// 判断短指令是否为「纯填充词」—— 没有任何实际工作内容的反馈/确认/试错语。
+///
+/// 判别规则：
+/// 1. 去除首尾空白和所有标点后，剩余字符数 ≤ 6（中英文均按 char 计）
+/// 2. 剩余字符的小写形式必须**完全等于** [`FILLER_TOKENS`] 中的某一项
+///
+/// 例：「再试一次。」「好的」「嗯」「OK 继续」会被识别；
+/// 而「再调一下 X 的颜色」「为什么 build 失败」不会被识别（实质内容超长 / 含具体名词）。
+///
+/// 保守策略：宁可漏掉一些填充词，也不要误杀真实指令。
+pub(crate) fn is_filler_prompt(text: &str) -> bool {
+    let cleaned: String = text
+        .chars()
+        .filter(|c| !c.is_whitespace() && !is_punct_char(*c))
+        .collect();
+    if cleaned.is_empty() {
+        return true;
+    }
+    if cleaned.chars().count() > 6 {
+        return false;
+    }
+    let lower = cleaned.to_lowercase();
+    FILLER_TOKENS.iter().any(|tok| lower == *tok)
+}
+
+/// 「纯填充词」白名单（小写、已去标点空白）。
+///
+/// 都是用户对 AI 回复的反馈/确认/试错语，单独看没有任何工作信息。
+/// 拓展前请反复推敲：误杀真实指令的代价远大于漏过填充词。
+const FILLER_TOKENS: &[&str] = &[
+    // 试错 / 重试
+    "再试一次",
+    "再试",
+    "重试",
+    "再来一次",
+    "再来",
+    "试试",
+    "试一下",
+    // 确认 / 表态
+    "嗯",
+    "好",
+    "好的",
+    "可以",
+    "可以的",
+    "对",
+    "对的",
+    "是",
+    "是的",
+    "明白",
+    "了解",
+    "行",
+    "没问题",
+    "ok",
+    "okay",
+    // 继续指令（单纯让 AI 继续，无新增内容）
+    "继续",
+    "好继续",
+    "嗯继续",
+    "继续",
+    "好的继续",
+    // 短问询（没有任何上下文的疑问）
+    "为啥",
+    "怎么",
+    "怎么了",
+    "为什么",
+];
+
+/// 判断字符是否是常见标点（中英文）。
+fn is_punct_char(c: char) -> bool {
+    matches!(
+        c,
+        '。' | '，'
+            | '？'
+            | '！'
+            | '；'
+            | '：'
+            | '、'
+            | '~'
+            | '.'
+            | ','
+            | '?'
+            | '!'
+            | ';'
+            | ':'
+            | '"'
+            | '\''
+            | '`'
+            | '（'
+            | '）'
+            | '('
+            | ')'
+            | '【'
+            | '】'
+            | '['
+            | ']'
+    )
+}
+
+/// 判断 reply 是否"弱表态" —— 内容太少不值得喂给 LLM。
+///
+/// 弱表态典型形态：「好的」「已收到」「明白」「稍等」开头且去标点后总长 < 10 字符。
+/// 把这些设为 None 可避免 LLM 把它们当成"做了什么"的依据。
+fn is_weak_reply(reply: &str) -> bool {
+    // 先去掉 clip_tail 加的 `…` 前缀
+    let t = reply.trim_start_matches('…').trim();
+    let cleaned: String = t
+        .chars()
+        .filter(|c| !c.is_whitespace() && !is_punct_char(*c))
+        .collect();
+    let n = cleaned.chars().count();
+    if n == 0 {
+        return true;
+    }
+    if n < 4 {
+        return true;
+    }
+    // 短而且以弱表态开头 → 视为弱
+    if n < 12 {
+        const WEAK_OPENS: &[&str] = &[
+            "好的",
+            "好",
+            "可以",
+            "明白",
+            "了解",
+            "稍等",
+            "收到",
+            "嗯",
+            "ok",
+            "okay",
+            "已收到",
+        ];
+        let lower = cleaned.to_lowercase();
+        if WEAK_OPENS.iter().any(|w| lower.starts_with(w)) {
+            return true;
+        }
+    }
+    false
 }
 
 /// 取文本末尾最多 `max` 个字符（按 Unicode char）。
@@ -659,10 +809,10 @@ pub(crate) fn pair_replies(messages: &mut [Message]) {
         }
         // 收集 [i+1..] 段里直到下一条 user 之前的所有 assistant 文本
         let mut parts: Vec<&str> = Vec::new();
-        for j in (i + 1)..len {
-            match messages[j].role {
+        for m in messages.iter().skip(i + 1) {
+            match m.role {
                 Role::Assistant => {
-                    let t = messages[j].text.trim();
+                    let t = m.text.trim();
                     if !t.is_empty() {
                         parts.push(t);
                     }
@@ -675,7 +825,9 @@ pub(crate) fn pair_replies(messages: &mut [Message]) {
         }
         let combined = parts.join("\n");
         let reply = clip_tail(combined.trim(), REPLY_MAX_CHARS);
-        if !reply.is_empty() {
+        // 过滤弱表态：「好的」「已收到」之类信息密度过低的回复设为 None，
+        // 避免 LLM 把这些当成"做了什么"的依据。
+        if !reply.is_empty() && !is_weak_reply(&reply) {
             messages[i].reply = Some(reply);
         }
     }
@@ -908,6 +1060,116 @@ mod tests {
         assert_eq!(s.by_project["p"].len(), 1, "噪音应被过滤");
         assert_eq!(s.by_project["p"][0].text, "真实工作指令");
         assert_eq!(s.stats.total_prompts, 1);
+    }
+
+    // -------- 填充词指令过滤（v0.1.2 新增）--------
+
+    #[test]
+    fn filler_prompts_detected() {
+        // 试错 / 重试
+        assert!(is_filler_prompt("再试一次"));
+        assert!(is_filler_prompt("再试一次。"));
+        assert!(is_filler_prompt("重试"));
+        // 短确认 / 表态
+        assert!(is_filler_prompt("好的"));
+        assert!(is_filler_prompt("好的。"));
+        assert!(is_filler_prompt("嗯"));
+        assert!(is_filler_prompt("明白"));
+        assert!(is_filler_prompt("OK"));
+        assert!(is_filler_prompt("ok"));
+        assert!(is_filler_prompt("没问题"));
+        // 继续指令（无新增内容）
+        assert!(is_filler_prompt("继续"));
+        assert!(is_filler_prompt("继续。"));
+        // 短问询
+        assert!(is_filler_prompt("为什么"));
+        assert!(is_filler_prompt("为啥？"));
+    }
+
+    #[test]
+    fn filler_prompts_do_not_eat_real_work() {
+        // 这些都不是填充词 —— 含具体名词或动词宾语
+        assert!(!is_filler_prompt("再调一下颜色"));
+        assert!(!is_filler_prompt("重试一下登录流程"));
+        assert!(!is_filler_prompt("为什么 build 失败了"));
+        assert!(!is_filler_prompt("继续优化 scheduler.rs"));
+        assert!(!is_filler_prompt("帮我重构这个模块"));
+        // 长度超阈值即便起首是填充词也保留
+        assert!(!is_filler_prompt("好的，那我们看看 cron 解析"));
+    }
+
+    #[test]
+    fn is_noise_prompt_includes_filler() {
+        // is_noise_prompt 现在涵盖了填充词（aggregate 走这条路过滤）
+        assert!(is_noise_prompt("好的"));
+        assert!(is_noise_prompt("再试一次"));
+        assert!(!is_noise_prompt("帮我重构 scheduler.rs 的 cron 解析"));
+    }
+
+    #[test]
+    fn aggregate_filters_filler_prompts() {
+        let msgs = vec![
+            msg(Role::User, "p", "实现 X 模块", 2),
+            msg(Role::User, "p", "好的", 2),
+            msg(Role::User, "p", "再试一次", 1),
+            msg(Role::User, "p", "继续优化 Y 模块", 0),
+        ];
+        let s = aggregate(msgs);
+        let texts: Vec<&str> = s.by_project["p"].iter().map(|i| i.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            vec!["实现 X 模块", "继续优化 Y 模块"],
+            "填充词「好的」「再试一次」应被过滤，实际：{texts:?}"
+        );
+    }
+
+    // -------- 弱表态回复过滤 --------
+
+    #[test]
+    fn weak_replies_detected() {
+        assert!(is_weak_reply("好的"));
+        assert!(is_weak_reply("好的。"));
+        assert!(is_weak_reply("明白"));
+        assert!(is_weak_reply("收到。"));
+        assert!(is_weak_reply("…明白"));
+        assert!(is_weak_reply("已收到"));
+        assert!(is_weak_reply(""));
+    }
+
+    #[test]
+    fn strong_replies_kept() {
+        // 含真实结论的回复
+        assert!(!is_weak_reply("已完成 LLM 抽象层重构，新增 llm.rs"));
+        assert!(!is_weak_reply("修复了 scheduler.rs 的 cron 解析 bug"));
+        // 弱表态后跟具体内容
+        assert!(!is_weak_reply("好的，我已经修改了 X 模块的 Y 函数"));
+    }
+
+    #[test]
+    fn pair_replies_drops_weak_reply() {
+        // 一个 user prompt 后只有「好的」类回复 → reply 应被丢弃
+        let mut msgs = vec![
+            msg(Role::User, "p", "实现 X", 0),
+            msg(Role::Assistant, "p", "好的。", 0),
+        ];
+        pair_replies(&mut msgs);
+        assert!(msgs[0].reply.is_none(), "弱表态回复应被丢弃");
+    }
+
+    #[test]
+    fn pair_replies_keeps_strong_reply() {
+        let mut msgs = vec![
+            msg(Role::User, "p", "实现 X", 0),
+            msg(
+                Role::Assistant,
+                "p",
+                "已完成 X 模块的实现，新增 x.rs 文件",
+                0,
+            ),
+        ];
+        pair_replies(&mut msgs);
+        assert!(msgs[0].reply.is_some());
+        assert!(msgs[0].reply.as_deref().unwrap().contains("已完成 X"));
     }
 
     #[test]

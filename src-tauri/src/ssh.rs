@@ -184,14 +184,21 @@ pub async fn sync_to_cache(ws: &Workspace) -> Result<HashMap<String, PathBuf>> {
     Ok(out)
 }
 
-/// 把一批远端项目根目录的 `*.md` 文档拉到本地缓存并读出。
+/// 把一批远端项目的 `*.md` 文档拉到本地缓存并读出。
+///
+/// 拉取范围与 [`crate::projectdocs`] 一致：项目根 + `doc/docs` 子目录最多两层。
+/// 这里用 `maxdepth=3` 全量拉，本地端扫描时再按 doc 子目录名过滤，避开
+/// 远端 shell 的复杂 find 表达式（不同发行版的 find 兼容性差）。
+///
+/// `since` 传给 [`crate::projectdocs::read_local_project_docs`] 用于强/弱信号分类。
 ///
 /// `project_paths`：项目名 → 远端项目真实路径（cwd）。
-/// 返回 项目名 → md 合并文本。单个项目失败（无 md / 路径不存在 / ssh 错误）
-/// 只 `warn!` 后跳过，不阻塞其他项目。
+/// 返回 项目名 → md 合并文本（含强/弱分区）。单个项目失败（无 md / 路径不存在 / ssh
+/// 错误）只 `warn!` 后跳过，不阻塞其他项目。
 pub async fn sync_project_docs(
     ws: &Workspace,
     project_paths: &HashMap<String, String>,
+    since: chrono::DateTime<chrono::Local>,
 ) -> Result<HashMap<String, String>> {
     require_ssh(ws)?;
     if ws.auth_method == SshAuthMethod::Password {
@@ -208,11 +215,12 @@ pub async fn sync_project_docs(
             tracing::warn!("创建项目文档缓存目录失败 {}: {e}", local.display());
             continue;
         }
-        // 只拉项目根目录层（maxdepth 1）的 *.md
-        match tar_pull(ws, remote_path, &local, "*.md", Some(1)).await {
+        // maxdepth=3 拉所有 *.md（含 doc/docs 子目录两层）；本地扫描会过滤非 doc 子目录
+        match tar_pull(ws, remote_path, &local, "*.md", Some(3)).await {
             Ok(()) => {
                 if let Some(local_str) = local.to_str() {
-                    if let Some(doc) = crate::projectdocs::read_local_project_docs(local_str) {
+                    if let Some(doc) = crate::projectdocs::read_local_project_docs(local_str, since)
+                    {
                         out.insert(project.clone(), doc);
                     }
                 }

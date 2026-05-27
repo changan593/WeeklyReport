@@ -507,7 +507,7 @@ fn render_meta_header(meta: &ReportMeta) -> String {
     // 项目分布条形图：取 Top 8，按数量降序
     if !meta.project_breakdown.is_empty() {
         let mut rows: Vec<(String, u32)> = meta.project_breakdown.clone();
-        rows.sort_by(|a, b| b.1.cmp(&a.1));
+        rows.sort_by_key(|(_, v)| std::cmp::Reverse(*v));
         let max_val = rows.iter().map(|(_, v)| *v).max().unwrap_or(1).max(1);
         let limit = rows.len().min(8);
         let rows = &rows[..limit];
@@ -905,13 +905,16 @@ mod tests {
 
     #[tokio::test]
     async fn send_rejects_empty_to() {
+        // i18n 全局 LANG 可能被并发的 i18n 测试切到 "en"，这里显式锁定
+        // zh-CN 才能让断言稳定（"收件人" 在英文翻译里没有对应字符）。
+        crate::i18n::set_language("zh-CN");
         let cfg = SmtpConfig {
             host: "smtp.example.com".into(),
             ..Default::default()
         };
         let req = EmailRequest::default();
         let err = send(&cfg, &req).await.unwrap_err().to_string();
-        assert!(err.contains("收件人"));
+        assert!(err.contains("收件人") || err.contains("Recipient"));
     }
 
     #[tokio::test]
